@@ -30,7 +30,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 12000
 | `app/main.py` | All FastAPI routes: pages, OAuth, envelope actions, JSON API |
 | `app/config.py` | Settings from env/`.env`; Docusign environment URL map |
 | `app/docusign_client.py` | eSignature REST client (OAuth, envelopes, recipients, documents) |
-| `app/db.py` | SQLite access layer, schema, sample seed data |
+| `app/db.py` | SQLite access layer, schema, agreement cache |
 | `app/templates_data.py` | Sample agreement templates |
 | `app/pdf.py` | Dependency-free PDF generator |
 | `app/templates/*.html` | Jinja templates |
@@ -46,17 +46,21 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 12000
 - Front-end: plain JavaScript, no build step. Shared helpers live on
   `window.App` (`toast`, `setLoading`, `postJSON`) in `static/js/app.js`.
 - Data: SQLite via `app/db.py`. The `data/` directory (DB + uploads) is
-  git-ignored. Delete `data/` to reset to fresh sample data.
+  git-ignored. Delete `data/` to reset the local cache; agreements are reloaded
+  from Docusign on the next sign-in.
 
 ## Docusign integration notes
 
-- Two OAuth flows are supported: JWT Grant (`request_jwt_token`) and
-  Authorization Code Grant (`authorization_url` / `exchange_code_for_token`).
-  The session token takes precedence; JWT is the fallback for a session that has
-  none.
+- Two OAuth flows were supported before; only Authorization Code Grant
+  (`authorization_url` / `exchange_code_for_token`) remains. JWT Grant was
+  removed. Users sign in via `/login`; the session token is required for every
+  Docusign call.
 - Access tokens are stored server-side in `_SESSIONS` in `main.py`. The browser
   cookie is an itsdangerous-signed opaque session id only. Never put tokens in
   cookies, responses, or logs.
+- Agreements are loaded from the signed-in user's Docusign account
+  (`_sync_envelopes` calls `list_envelopes`, i.e. Envelopes:listStatusChanges).
+  There is no local sample/dummy data.
 - Envelopes use a `SignHere` tab with `anchorString="/sn1/"`. Generated template
   PDFs contain that anchor; uploaded PDFs must contain it too (otherwise
   Docusign places the tab at the top-left).

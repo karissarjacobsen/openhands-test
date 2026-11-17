@@ -139,6 +139,17 @@ class Database:
         agreement["events"] = self.list_events(agreement_id)
         return agreement
 
+    def get_agreement_by_envelope(self, envelope_id: str) -> dict[str, Any] | None:
+        row = self._conn().execute(
+            "SELECT * FROM agreements WHERE envelope_id = ?", (envelope_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        agreement = dict(row)
+        agreement["recipients"] = self.list_recipients(agreement["id"])
+        agreement["events"] = self.list_events(agreement["id"])
+        return agreement
+
     def list_recipients(self, agreement_id: str) -> list[dict[str, Any]]:
         rows = self._conn().execute(
             "SELECT * FROM recipients WHERE agreement_id = ? ORDER BY routing_order, id",
@@ -185,6 +196,7 @@ class Database:
         recipients: list[dict[str, Any]] | None = None,
         document_name: str | None = None,
         document_path: str | None = None,
+        envelope_id: str | None = None,
         docusign_status: str | None = None,
         completed_at: str | None = None,
         agreement_id: str | None = None,
@@ -196,9 +208,9 @@ class Database:
             """
             INSERT INTO agreements (
                 id, title, client_name, agreement_type, value, currency, status,
-                owner, notes, effective_date, document_name, document_path,
-                docusign_status, completed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                owner, notes, effective_date, envelope_id, document_name,
+                document_path, docusign_status, completed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agreement_id,
@@ -211,6 +223,7 @@ class Database:
                 owner,
                 notes,
                 effective_date,
+                envelope_id,
                 document_name,
                 document_path,
                 docusign_status,
@@ -320,6 +333,44 @@ class Database:
         )
         conn.commit()
 
+    def upsert_recipient(
+        self,
+        agreement_id: str,
+        *,
+        name: str,
+        email: str,
+        role: str = "signer",
+        routing_order: int = 1,
+        status: str = "created",
+        signed_at: str | None = None,
+    ) -> None:
+        """Insert a recipient, or update the existing row for that email."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT id FROM recipients WHERE agreement_id = ? AND lower(email) = lower(?)",
+            (agreement_id, email),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO recipients
+                    (agreement_id, name, email, role, routing_order, status, signed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (agreement_id, name, email, role, routing_order, status, signed_at),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE recipients
+                SET name = ?, role = ?, routing_order = ?, status = ?,
+                    signed_at = COALESCE(?, signed_at)
+                WHERE id = ?
+                """,
+                (name, role, routing_order, status, signed_at, row["id"]),
+            )
+        conn.commit()
+
     def add_event(self, agreement_id: str, kind: str, message: str) -> None:
         conn = self._conn()
         conn.execute(
@@ -327,127 +378,6 @@ class Database:
             (agreement_id, kind, message, utcnow()),
         )
         conn.commit()
-
-
-def seed_sample_data(db: Database) -> None:
-    """Populate a few realistic agreements so the dashboard is never empty."""
-    if db.list_agreements():
-        return
-
-    samples = [
-        {
-            "title": "Acme Corp - Master Services Agreement",
-            "client_name": "Acme Corp",
-            "agreement_type": "Master Services Agreement",
-            "value": 125000.0,
-            "owner": "karissa@example.com",
-            "status": "completed",
-            "effective_date": "2026-01-15",
-            "notes": "Annual renewal. Signed by both parties.",
-            "completed_at": "2026-01-22T14:05:00+00:00",
-            "recipients": [
-                {
-                    "name": "Dana Whitfield",
-                    "email": "dana.whitfield@acme.example",
-                    "role": "signer",
-                    "status": "completed",
-                },
-                {
-                    "name": "Karissa Jacobsen",
-                    "email": "karissa@example.com",
-                    "role": "carbonCopy",
-                    "status": "completed",
-                },
-            ],
-        },
-        {
-            "title": "Northwind Traders - Sales Agreement",
-            "client_name": "Northwind Traders",
-            "agreement_type": "Sales Agreement",
-            "value": 48900.0,
-            "owner": "karissa@example.com",
-            "status": "sent",
-            "effective_date": "2026-02-01",
-            "notes": "Awaiting counter-signature from procurement.",
-            "recipients": [
-                {
-                    "name": "Priya Raman",
-                    "email": "priya.raman@northwind.example",
-                    "role": "signer",
-                    "status": "delivered",
-                }
-            ],
-        },
-        {
-            "title": "Globex - Mutual NDA",
-            "client_name": "Globex",
-            "agreement_type": "Mutual NDA",
-            "value": 0.0,
-            "owner": "legal@example.com",
-            "status": "draft",
-            "effective_date": "2026-02-10",
-            "notes": "Draft pending legal review of section 4.",
-            "recipients": [
-                {
-                    "name": "Sam Okafor",
-                    "email": "sam.okafor@globex.example",
-                    "role": "signer",
-                    "status": "created",
-                }
-            ],
-        },
-        {
-            "title": "Initech - Statement of Work",
-            "client_name": "Initech",
-            "agreement_type": "Statement of Work",
-            "value": 18750.0,
-            "owner": "delivery@example.com",
-            "status": "declined",
-            "effective_date": "2026-01-05",
-            "notes": "Declined - budget moved to next quarter.",
-            "recipients": [
-                {
-                    "name": "Bill Lumbergh",
-                    "email": "bill.lumbergh@initech.example",
-                    "role": "signer",
-                    "status": "declined",
-                }
-            ],
-        },
-        {
-            "title": "Umbrella Health - Vendor Agreement",
-            "client_name": "Umbrella Health",
-            "agreement_type": "Vendor Agreement",
-            "value": 73200.0,
-            "owner": "karissa@example.com",
-            "status": "delivered",
-            "effective_date": "2026-02-05",
-            "notes": "Compliance addendum included.",
-            "recipients": [
-                {
-                    "name": "Alex Moreau",
-                    "email": "alex.moreau@umbrella.example",
-                    "role": "signer",
-                    "status": "delivered",
-                },
-                {
-                    "name": "Rita Chen",
-                    "email": "rita.chen@umbrella.example",
-                    "role": "carbonCopy",
-                    "status": "sent",
-                },
-            ],
-        },
-    ]
-
-    for sample in samples:
-        recipients = sample.pop("recipients")
-        agreement = db.create_agreement(recipients=recipients, **sample)
-        db.add_event(
-            agreement["id"],
-            "seeded",
-            "Sample agreement loaded for demonstration",
-        )
 
 
 def to_json(value: Any) -> str:

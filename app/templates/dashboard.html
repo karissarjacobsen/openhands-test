@@ -4,8 +4,13 @@
 
 {% if not docusign_connected %}
 <div class="alert alert-info">
-  Not connected to Docusign yet. You can browse and create agreements now, then
-  <a href="/settings">connect to Docusign</a> to send envelopes.
+  Sign in with Docusign to load your agreements. Your envelopes are read from your
+  own Docusign account — nothing is stored locally until you sign in.
+  <a href="/login">Sign in with Docusign</a>
+</div>
+{% elif sync_error %}
+<div class="alert alert-error">
+  Could not load agreements from Docusign: {{ sync_error }}
 </div>
 {% endif %}
 
@@ -98,8 +103,12 @@
         {% else %}
         <tr>
           <td colspan="8" class="empty">
-            No agreements match your filters.
+            {% if docusign_connected %}
+            No agreements found in your Docusign account.
             <a href="/agreements/new">Create one</a>.
+            {% else %}
+            <a href="/login">Sign in with Docusign</a> to load your agreements.
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
