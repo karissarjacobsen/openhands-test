@@ -1,24 +1,24 @@
-"""Docusign eSignature REST API client.
+"""Docusign Agreement Manager API client.
 
-Implements the parts of the API this app needs, directly against the REST
-endpoints so the behaviour is easy to follow and there is no SDK to pin:
+Implements the Agreement Manager endpoints this app needs directly against the
+REST API, so the behaviour is easy to follow and there is no SDK to pin:
 
 * OAuth 2.0 JWT Grant   -> service integrations (no user interaction)
 * OAuth 2.0 Auth Code   -> user-interactive consent
-* Envelopes:create      -> upload a PDF and create/send an envelope
-* Envelopes:get         -> envelope status
-* EnvelopeRecipients    -> per-recipient status
-* EnvelopeDocuments:get -> download the completed (combined) PDF
+* Agreements:list       -> agreements held in the account's AGM repository
+* Agreements:get        -> one agreement with its parties and provisions
+* AgreementTypes:list   -> configured agreement types for the account
+* Document download     -> via an agreement's `download_url`
 
-Docs: https://developers.docusign.com/docs/esign-rest-api/
+Docs: https://developers.docusign.com/docs/agreement-manager-api/
 """
 
 from __future__ import annotations
 
-import base64
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import jwt
@@ -29,12 +29,11 @@ from .config import (
     Settings,
 )
 
-API_VERSION = "v2.1"
 TOKEN_REFRESH_MARGIN_SECONDS = 15 * 60
 
 
-class DocusignError(Exception):
-    """Raised when Docusign returns an error or the client is misconfigured."""
+class AgreementManagerError(Exception):
+    """Raised when Agreement Manager returns an error or the client is misconfigured."""
 
     def __init__(self, message: str, status_code: int | None = None, details: Any = None):
         super().__init__(message)
@@ -60,15 +59,15 @@ class Token:
 @dataclass
 class UserInfo:
     account_id: str
-    base_uri: str
+    base_uri: str = ""
     user_id: str = ""
     name: str = ""
     email: str = ""
     accounts: list[dict[str, Any]] = field(default_factory=list)
 
 
-class DocusignClient:
-    """Thin, explicit wrapper around the eSignature REST API."""
+class AgreementManagerClient:
+    """Thin, explicit wrapper around the Agreement Manager REST API."""
 
     def __init__(self, settings: Settings, access_token: str | None = None):
         self.settings = settings
@@ -86,7 +85,7 @@ class DocusignClient:
     def _build_jwt(self) -> str:
         private_key = self.settings._private_key()
         if not (self.settings.integration_key and self.settings.user_id and private_key):
-            raise DocusignError(
+            raise AgreementManagerError(
                 "JWT Grant is not configured. Set DOCUSIGN_INTEGRATION_KEY, "
                 "DOCUSIGN_USER_ID and DOCUSIGN_PRIVATE_KEY_PATH."
             )
@@ -117,9 +116,11 @@ class DocusignClient:
         try:
             response = httpx.post(url, data=data, timeout=30)
         except httpx.HTTPError as exc:
-            raise DocusignError(f"Could not reach Docusign token endpoint: {exc}") from exc
+            raise AgreementManagerError(
+                f"Could not reach Docusign token endpoint: {exc}"
+            ) from exc
         if response.status_code != 200:
-            raise DocusignError(
+            raise AgreementManagerError(
                 _auth_error_message(response),
                 status_code=response.status_code,
                 details=_safe_json(response),
@@ -137,7 +138,7 @@ class DocusignClient:
 
     def authorization_url(self, state: str) -> str:
         if not self.settings.auth_code_configured:
-            raise DocusignError(
+            raise AgreementManagerError(
                 "Authorization Code Grant is not configured. Set "
                 "DOCUSIGN_INTEGRATION_KEY and DOCUSIGN_CLIENT_SECRET."
             )
@@ -159,9 +160,11 @@ class DocusignClient:
         try:
             response = httpx.post(url, data=data, auth=auth, timeout=30)
         except httpx.HTTPError as exc:
-            raise DocusignError(f"Could not reach Docusign token endpoint: {exc}") from exc
+            raise AgreementManagerError(
+                f"Could not reach Docusign token endpoint: {exc}"
+            ) from exc
         if response.status_code != 200:
-            raise DocusignError(
+            raise AgreementManagerError(
                 _auth_error_message(response),
                 status_code=response.status_code,
                 details=_safe_json(response),
@@ -183,7 +186,6 @@ class DocusignClient:
         payload = self._request("GET", f"https://{self.settings.auth_server}/oauth/userinfo")
         accounts = payload.get("accounts", []) or []
         account_id = self.settings.account_id
-        base_uri = self.settings.default_base_uri
         if accounts:
             chosen = None
             if account_id:
@@ -192,15 +194,14 @@ class DocusignClient:
                 )
             chosen = chosen or accounts[0]
             account_id = chosen.get("account_id", account_id)
-            base_uri = (chosen.get("base_uri") or base_uri).rstrip("/")
         if not account_id:
-            raise DocusignError(
+            raise AgreementManagerError(
                 "No Docusign account id available. Set DOCUSIGN_ACCOUNT_ID or "
                 "ensure the authenticated user has at least one account."
             )
         self._user_info = UserInfo(
             account_id=account_id,
-            base_uri=base_uri,
+            base_uri=settings_base_uri(self.settings),
             user_id=payload.get("sub", ""),
             name=payload.get("name", ""),
             email=payload.get("email", ""),
@@ -220,21 +221,14 @@ class DocusignClient:
             return self._token
         return self.request_jwt_token()
 
-    def _base_url(self) -> str:
-        base_uri = self.settings.default_base_uri
-        try:
-            base_uri = self.get_user_info().base_uri
-        except DocusignError:
-            # Fall back to the environment default; the request will surface any error.
-            pass
-        return f"{base_uri.rstrip('/')}/restapi/{API_VERSION}"
+    def _api_url(self, path: str) -> str:
+        return f"{self.settings.agm_base_url}{path}"
 
     def _request(
         self,
         method: str,
         url: str,
         *,
-        json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         expect_binary: bool = False,
         auth_required: bool = True,
@@ -248,16 +242,17 @@ class DocusignClient:
                 method,
                 url,
                 headers=headers,
-                json=json_body,
                 params=params,
                 timeout=60,
                 follow_redirects=True,
             )
         except httpx.HTTPError as exc:
-            raise DocusignError(f"Network error calling Docusign: {exc}") from exc
+            raise AgreementManagerError(
+                f"Network error calling Agreement Manager: {exc}"
+            ) from exc
 
         if response.status_code >= 400:
-            raise DocusignError(
+            raise AgreementManagerError(
                 _api_error_message(response),
                 status_code=response.status_code,
                 details=_safe_json(response),
@@ -271,126 +266,94 @@ class DocusignClient:
         except ValueError:
             return {"raw": response.text}
 
-    # ------------------------------------------------------------- envelopes
+    # ------------------------------------------------------------ agreements
 
-    def create_envelope(
+    def list_agreements(
         self,
         *,
-        subject: str,
-        document_base64: str,
-        document_name: str,
-        recipients: list[dict[str, Any]],
-        status: str = "sent",
-        email_blurb: str = "",
-        anchor_string: str = "/sn1/",
-    ) -> dict[str, Any]:
-        """Create an envelope from a single PDF and optionally send it.
+        limit: int | None = None,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return agreements from the account's Agreement Manager repository.
 
-        Recipients are dicts with name/email/role/routing_order. Signers get a
-        SignHere tab anchored on `anchor_string`, which must appear in the PDF.
+        Follows the `_links.next` pagination link until every page is read, so the
+        caller receives a flat list regardless of how the API paginates.
         """
         account_id = self.account_id()
-        signers = []
-        carbon_copies = []
-        for index, recipient in enumerate(recipients, start=1):
-            role = (recipient.get("role") or "signer").lower()
-            base = {
-                "email": recipient["email"],
-                "name": recipient["name"],
-                "recipientId": str(index),
-                "routingOrder": str(recipient.get("routing_order", index)),
-            }
-            if role in {"carboncopy", "cc", "carbon_copy"}:
-                base["recipientId"] = str(index)
-                carbon_copies.append(base)
-            else:
-                base["tabs"] = {
-                    "signHereTabs": [
-                        {
-                            "anchorString": anchor_string,
-                            "anchorUnits": "pixels",
-                            "anchorXOffset": "20",
-                            "anchorYOffset": "10",
-                        }
-                    ]
-                }
-                signers.append(base)
-
-        if not signers and carbon_copies:
-            # An envelope needs at least one signer; promote the first CC.
-            promoted = carbon_copies.pop(0)
-            promoted["tabs"] = {
-                "signHereTabs": [{"anchorString": anchor_string, "anchorUnits": "pixels"}]
-            }
-            signers.append(promoted)
-
-        if not signers:
-            raise DocusignError("At least one signer recipient is required.")
-
-        envelope_definition: dict[str, Any] = {
-            "emailSubject": subject,
-            "status": status,
-            "documents": [
-                {
-                    "documentBase64": document_base64,
-                    "name": document_name,
-                    "fileExtension": "pdf",
-                    "documentId": "1",
-                }
-            ],
-            "recipients": {
-                "signers": signers,
-                "carbonCopies": carbon_copies,
-            },
-        }
-        if email_blurb:
-            envelope_definition["emailBlurb"] = email_blurb
-
-        url = f"{self._base_url()}/accounts/{account_id}/envelopes"
-        return self._request("POST", url, json_body=envelope_definition)
-
-    def get_envelope(self, envelope_id: str) -> dict[str, Any]:
-        account_id = self.account_id()
-        url = f"{self._base_url()}/accounts/{account_id}/envelopes/{envelope_id}"
-        return self._request("GET", url)
-
-    def get_recipients(self, envelope_id: str) -> dict[str, Any]:
-        account_id = self.account_id()
-        url = (
-            f"{self._base_url()}/accounts/{account_id}/envelopes/"
-            f"{envelope_id}/recipients"
-        )
-        return self._request("GET", url)
-
-    def list_envelopes(
-        self, *, from_date: str | None = None, status: str | None = None
-    ) -> dict[str, Any]:
-        account_id = self.account_id()
-        params: dict[str, Any] = {}
-        if from_date:
-            params["from_date"] = from_date
+        url: str | None = self._api_url(f"/accounts/{account_id}/agreements")
+        params: dict[str, Any] | None = {}
+        if limit is not None:
+            params["page_limit"] = limit
         if status:
             params["status"] = status
-        url = f"{self._base_url()}/accounts/{account_id}/envelopes"
-        return self._request("GET", url, params=params or None)
+        if search:
+            params["$search"] = search
 
-    def download_document(self, envelope_id: str, document_id: str = "combined") -> bytes:
-        """Download envelope documents. `combined` yields all docs as one PDF."""
+        agreements: list[dict[str, Any]] = []
+        while url:
+            payload = self._request("GET", url, params=params or None)
+            if isinstance(payload, list):
+                agreements.extend(payload)
+                break
+            agreements.extend(payload.get("data", []) or [])
+            next_link = (payload.get("_links") or {}).get("next")
+            if not next_link:
+                break
+            # Only the first request carries query params; `next` is pre-built.
+            url = next_link
+            params = None
+            if limit is not None and len(agreements) >= limit:
+                break
+        if limit is not None:
+            return agreements[:limit]
+        return agreements
+
+    def get_agreement(self, agreement_id: str) -> dict[str, Any]:
         account_id = self.account_id()
-        url = (
-            f"{self._base_url()}/accounts/{account_id}/envelopes/"
-            f"{envelope_id}/documents/{document_id}"
+        url = self._api_url(f"/accounts/{account_id}/agreements/{agreement_id}")
+        payload = self._request("GET", url)
+        if isinstance(payload, dict) and "data" in payload:
+            return payload["data"] or {}
+        return payload
+
+    def list_agreement_types(self) -> list[str]:
+        account_id = self.account_id()
+        url = self._api_url(f"/accounts/{account_id}/agreement-types")
+        payload = self._request("GET", url)
+        if isinstance(payload, dict) and "data" in payload:
+            return list(payload["data"] or [])
+        return list(payload or [])
+
+    def download_document(self, download_url: str) -> bytes:
+        """Download an agreement document from its `download_url`.
+
+        Relative URLs are resolved against the Agreement Manager base URL. An
+        access token is attached only for Docusign hosts; other hosts (for
+        example a pre-signed object store URL) must not receive the bearer token.
+        """
+        url = download_url
+        parsed = urlparse(download_url)
+        auth_required = True
+        if parsed.scheme and parsed.netloc:
+            host = parsed.netloc.lower()
+            auth_required = host.endswith("docusign.com") or host.endswith("docusign.net")
+        else:
+            url = f"{self.settings.agm_base_url.rstrip('/')}/{download_url.lstrip('/')}"
+        content = self._request(
+            "GET", url, expect_binary=True, auth_required=auth_required
         )
-        content = self._request("GET", url, expect_binary=True)
         if isinstance(content, bytes) and content.lstrip().startswith(b"{"):
             # Some errors still return 200 with a JSON body.
-            raise DocusignError("Docusign returned an error payload instead of a PDF.")
+            raise AgreementManagerError(
+                "Agreement Manager returned an error payload instead of a document."
+            )
         return content
 
-    def void_envelope(self, envelope_id: str, reason: str) -> dict[str, Any]:
-        account_id = self.account_id()
-        url = f"{self._base_url()}/accounts/{account_id}/envelopes/{envelope_id}"
-        return self._request("PUT", url, json_body={"status": "voided", "voidedReason": reason})
+
+def settings_base_uri(settings: Settings) -> str:
+    """The OAuth host for the configured environment (used for display only)."""
+    return settings.agm_base_url
 
 
 # --------------------------------------------------------------------- helpers
@@ -424,10 +387,5 @@ def _api_error_message(response: httpx.Response) -> str:
     if isinstance(payload, dict):
         message = payload.get("message") or payload.get("errorCode")
         if message:
-            return f"Docusign API error ({response.status_code}): {message}"
-    return f"Docusign API error (HTTP {response.status_code})."
-
-
-def encode_document(path: str) -> str:
-    with open(path, "rb") as handle:
-        return base64.b64encode(handle.read()).decode("ascii")
+            return f"Agreement Manager API error ({response.status_code}): {message}"
+    return f"Agreement Manager API error (HTTP {response.status_code})."

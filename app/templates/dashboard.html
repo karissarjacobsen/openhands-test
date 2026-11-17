@@ -4,9 +4,13 @@
 
 {% if not docusign_connected %}
 <div class="alert alert-info">
-  Not connected to Docusign yet. You can browse and create agreements now, then
-  <a href="/settings">connect to Docusign</a> to send envelopes.
+  Not connected to Agreement Manager. Agreements are read from your Docusign
+  Agreement Manager account, so <a href="/settings">connect first</a> to load them.
 </div>
+{% endif %}
+
+{% if sync_error %}
+<div class="alert alert-error">Could not load agreements from Agreement Manager: {{ sync_error }}</div>
 {% endif %}
 
 <div class="page-head">
@@ -16,24 +20,21 @@
       ${{ '{:,.2f}'.format(total_value) }}</p>
   </div>
   <div class="btn-row">
-    <a class="btn btn-primary" href="/agreements/new">+ New agreement</a>
+    <button class="btn" data-action="sync" id="sync-btn">Refresh from Agreement Manager</button>
   </div>
 </div>
 
 <div class="stat-grid">
-  <div class="stat"><div class="label">Draft</div><div class="value">{{ counts.draft }}</div></div>
-  <div class="stat"><div class="label">Sent</div><div class="value">{{ counts.sent }}</div></div>
-  <div class="stat"><div class="label">Delivered</div><div class="value">{{ counts.delivered }}</div></div>
-  <div class="stat"><div class="label">Completed</div><div class="value">{{ counts.completed }}</div></div>
-  <div class="stat"><div class="label">Declined</div><div class="value">{{ counts.declined }}</div></div>
-  <div class="stat"><div class="label">Voided</div><div class="value">{{ counts.voided }}</div></div>
+  <div class="stat"><div class="label">Pending</div><div class="value">{{ counts.pending }}</div></div>
+  <div class="stat"><div class="label">Complete</div><div class="value">{{ counts.complete }}</div></div>
+  <div class="stat"><div class="label">Inactive</div><div class="value">{{ counts.inactive }}</div></div>
 </div>
 
 <form class="filters" method="get" action="/">
   <div class="field grow">
     <label for="q">Search</label>
     <input type="search" id="q" name="q" value="{{ filters.q }}"
-           placeholder="Title, client, owner or id" />
+           placeholder="Title, file name, type or source id" />
   </div>
   <div class="field">
     <label for="status">Status</label>
@@ -67,11 +68,11 @@
       <thead>
         <tr>
           <th>Agreement</th>
-          <th>Client</th>
           <th>Type</th>
+          <th>Category</th>
           <th>Value</th>
           <th>Status</th>
-          <th>Recipients</th>
+          <th>Parties</th>
           <th>Updated</th>
           <th class="right">Actions</th>
         </tr>
@@ -80,16 +81,16 @@
         {% for a in agreements %}
         <tr>
           <td>
-            <a href="/agreements/{{ a.id }}"><strong>{{ a.title }}</strong></a>
-            {% if a.envelope_id %}
-            <div class="mono muted">env {{ a.envelope_id[:18] }}…</div>
+            <a href="/agreements/{{ a.id }}"><strong>{{ a.title or a.file_name or a.id }}</strong></a>
+            {% if a.source_id %}
+            <div class="mono muted">source {{ a.source_id[:18] }}…</div>
             {% endif %}
           </td>
-          <td>{{ a.client_name or '—' }}</td>
-          <td>{{ a.agreement_type }}</td>
-          <td>${{ '{:,.0f}'.format(a.value) }}</td>
+          <td>{{ a.agreement_type or '—' }}</td>
+          <td>{{ a.category or '—' }}</td>
+          <td>{% if a.currency %}{{ a.currency }} {% endif %}{{ '{:,.0f}'.format(a.value) }}</td>
           <td><span class="badge badge-{{ a.status }}">{{ a.status }}</span></td>
-          <td>{{ a.recipients|length }}</td>
+          <td>{{ a.parties|length }}</td>
           <td class="muted">{{ a.updated_at[:10] }}</td>
           <td class="actions right">
             <a class="btn btn-sm" href="/agreements/{{ a.id }}">View</a>
@@ -98,8 +99,11 @@
         {% else %}
         <tr>
           <td colspan="8" class="empty">
-            No agreements match your filters.
-            <a href="/agreements/new">Create one</a>.
+            {% if docusign_connected %}
+            No agreements found in your Agreement Manager account.
+            {% else %}
+            Connect to Agreement Manager to load your agreements.
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

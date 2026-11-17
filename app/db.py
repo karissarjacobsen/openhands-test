@@ -1,11 +1,15 @@
-"""SQLite persistence for agreements, recipients and status history."""
+"""SQLite persistence: a local cache of agreements read from Agreement Manager.
+
+The app does not own agreement data. Every row here is a copy of an agreement
+held in the Docusign Agreement Manager repository, refreshed on each sync so the
+dashboard can render without an API round-trip per page load.
+"""
 
 from __future__ import annotations
 
 import json
 import sqlite3
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,60 +17,38 @@ from typing import Any
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agreements (
     id              TEXT PRIMARY KEY,
-    title           TEXT NOT NULL,
-    client_name     TEXT NOT NULL DEFAULT '',
-    agreement_type  TEXT NOT NULL DEFAULT 'Sales Agreement',
+    title           TEXT NOT NULL DEFAULT '',
+    file_name       TEXT NOT NULL DEFAULT '',
+    agreement_type  TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
     value           REAL NOT NULL DEFAULT 0,
-    currency        TEXT NOT NULL DEFAULT 'USD',
-    status          TEXT NOT NULL DEFAULT 'draft',
-    owner           TEXT NOT NULL DEFAULT '',
-    notes           TEXT NOT NULL DEFAULT '',
+    currency        TEXT NOT NULL DEFAULT '',
     effective_date  TEXT NOT NULL DEFAULT '',
-    envelope_id     TEXT,
-    document_name   TEXT,
-    document_path   TEXT,
-    docusign_status TEXT,
-    completed_at    TEXT,
+    expiration_date TEXT NOT NULL DEFAULT '',
+    source_name     TEXT NOT NULL DEFAULT '',
+    source_id       TEXT NOT NULL DEFAULT '',
+    download_url    TEXT NOT NULL DEFAULT '',
+    provisions      TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS recipients (
+CREATE TABLE IF NOT EXISTS parties (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     agreement_id  TEXT NOT NULL REFERENCES agreements(id) ON DELETE CASCADE,
-    name          TEXT NOT NULL,
-    email         TEXT NOT NULL,
-    role          TEXT NOT NULL DEFAULT 'signer',
-    routing_order INTEGER NOT NULL DEFAULT 1,
-    status        TEXT NOT NULL DEFAULT 'created',
-    signed_at     TEXT
+    party_id      TEXT NOT NULL DEFAULT '',
+    name          TEXT NOT NULL DEFAULT '',
+    email         TEXT NOT NULL DEFAULT '',
+    role          TEXT NOT NULL DEFAULT 'party'
 );
 
-CREATE TABLE IF NOT EXISTS events (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    agreement_id  TEXT NOT NULL REFERENCES agreements(id) ON DELETE CASCADE,
-    kind          TEXT NOT NULL,
-    message       TEXT NOT NULL,
-    created_at    TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_recipients_agreement ON recipients(agreement_id);
-CREATE INDEX IF NOT EXISTS idx_events_agreement ON events(agreement_id);
+CREATE INDEX IF NOT EXISTS idx_parties_agreement ON parties(agreement_id);
 """
 
-# Statuses we track locally. `draft` is pre-send; the rest mirror Docusign
-# envelope statuses so the UI can display one consistent vocabulary.
-STATUSES = [
-    "draft",
-    "sent",
-    "delivered",
-    "completed",
-    "declined",
-    "voided",
-    "corrected",
-]
-
-TERMINAL_STATUSES = {"completed", "declined", "voided"}
+# Statuses reported by Agreement Manager. Lower-cased so the UI has one
+# consistent vocabulary regardless of how the API capitalises them.
+STATUSES = ["pending", "complete", "inactive"]
 
 
 def utcnow() -> str:
@@ -109,10 +91,11 @@ class Database:
         params: list[Any] = []
         if search:
             clauses.append(
-                "(title LIKE ? OR client_name LIKE ? OR owner LIKE ? OR id LIKE ?)"
+                "(title LIKE ? OR file_name LIKE ? OR agreement_type LIKE ? OR "
+                "category LIKE ? OR source_id LIKE ? OR id LIKE ?)"
             )
             like = f"%{search}%"
-            params.extend([like, like, like, like])
+            params.extend([like, like, like, like, like, like])
         if status:
             clauses.append("status = ?")
             params.append(status)
@@ -125,7 +108,7 @@ class Database:
         rows = self._conn().execute(sql, params).fetchall()
         agreements = [dict(r) for r in rows]
         for agreement in agreements:
-            agreement["recipients"] = self.list_recipients(agreement["id"])
+            agreement["provisions"] = _load_json(agreement.get("provisions"))
         return agreements
 
     def get_agreement(self, agreement_id: str) -> dict[str, Any] | None:
@@ -135,20 +118,13 @@ class Database:
         if row is None:
             return None
         agreement = dict(row)
-        agreement["recipients"] = self.list_recipients(agreement_id)
-        agreement["events"] = self.list_events(agreement_id)
+        agreement["provisions"] = _load_json(agreement.get("provisions"))
+        agreement["parties"] = self.list_parties(agreement_id)
         return agreement
 
-    def list_recipients(self, agreement_id: str) -> list[dict[str, Any]]:
+    def list_parties(self, agreement_id: str) -> list[dict[str, Any]]:
         rows = self._conn().execute(
-            "SELECT * FROM recipients WHERE agreement_id = ? ORDER BY routing_order, id",
-            (agreement_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def list_events(self, agreement_id: str) -> list[dict[str, Any]]:
-        rows = self._conn().execute(
-            "SELECT * FROM events WHERE agreement_id = ? ORDER BY id DESC",
+            "SELECT * FROM parties WHERE agreement_id = ? ORDER BY id",
             (agreement_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -164,291 +140,93 @@ class Database:
 
     def distinct_types(self) -> list[str]:
         rows = self._conn().execute(
-            "SELECT DISTINCT agreement_type FROM agreements ORDER BY agreement_type"
+            "SELECT DISTINCT agreement_type FROM agreements "
+            "WHERE agreement_type <> '' ORDER BY agreement_type"
         ).fetchall()
         return [r["agreement_type"] for r in rows]
 
     # ----------------------------------------------------------------- writes
 
-    def create_agreement(
+    def upsert_agreement(
         self,
-        *,
-        title: str,
-        client_name: str = "",
-        agreement_type: str = "Sales Agreement",
-        value: float = 0.0,
-        currency: str = "USD",
-        owner: str = "",
-        notes: str = "",
-        effective_date: str = "",
-        status: str = "draft",
-        recipients: list[dict[str, Any]] | None = None,
-        document_name: str | None = None,
-        document_path: str | None = None,
-        docusign_status: str | None = None,
-        completed_at: str | None = None,
-        agreement_id: str | None = None,
+        fields: dict[str, Any],
+        parties: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        agreement_id = agreement_id or str(uuid.uuid4())
+        """Insert or update an agreement cached from Agreement Manager.
+
+        When `parties` is None the cached parties are left untouched, so a
+        summary sync (which does not return parties) does not wipe them.
+        """
+        agreement_id = fields["id"]
+        existing = self._conn().execute(
+            "SELECT created_at FROM agreements WHERE id = ?", (agreement_id,)
+        ).fetchone()
         now = utcnow()
+        created_at = existing["created_at"] if existing else (fields.get("created_at") or now)
+        columns = {
+            "id": agreement_id,
+            "title": fields.get("title", ""),
+            "file_name": fields.get("file_name", ""),
+            "agreement_type": fields.get("agreement_type", ""),
+            "category": fields.get("category", ""),
+            "status": fields.get("status", "pending"),
+            "value": float(fields.get("value") or 0),
+            "currency": fields.get("currency", ""),
+            "effective_date": fields.get("effective_date", ""),
+            "expiration_date": fields.get("expiration_date", ""),
+            "source_name": fields.get("source_name", ""),
+            "source_id": fields.get("source_id", ""),
+            "download_url": fields.get("download_url", ""),
+            "provisions": json.dumps(fields.get("provisions") or {}, default=str),
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        names = ", ".join(columns)
+        placeholders = ", ".join("?" for _ in columns)
         conn = self._conn()
         conn.execute(
-            """
-            INSERT INTO agreements (
-                id, title, client_name, agreement_type, value, currency, status,
-                owner, notes, effective_date, document_name, document_path,
-                docusign_status, completed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                agreement_id,
-                title,
-                client_name,
-                agreement_type,
-                value,
-                currency,
-                status,
-                owner,
-                notes,
-                effective_date,
-                document_name,
-                document_path,
-                docusign_status,
-                completed_at,
-                now,
-                now,
-            ),
+            f"INSERT OR REPLACE INTO agreements ({names}) VALUES ({placeholders})",
+            list(columns.values()),
         )
         conn.commit()
-        for index, recipient in enumerate(recipients or [], start=1):
-            self.add_recipient(
-                agreement_id,
-                name=recipient.get("name", ""),
-                email=recipient.get("email", ""),
-                role=recipient.get("role", "signer"),
-                routing_order=int(recipient.get("routing_order", index)),
-                status=recipient.get("status", "created"),
-            )
-        self.add_event(agreement_id, "created", f"Agreement '{title}' created")
+        if parties is not None:
+            self.replace_parties(agreement_id, parties)
         return self.get_agreement(agreement_id)  # type: ignore[return-value]
 
-    def update_agreement(self, agreement_id: str, **fields: Any) -> dict[str, Any] | None:
-        allowed = {
-            "title",
-            "client_name",
-            "agreement_type",
-            "value",
-            "currency",
-            "status",
-            "owner",
-            "notes",
-            "effective_date",
-            "envelope_id",
-            "document_name",
-            "document_path",
-            "docusign_status",
-            "completed_at",
-        }
-        updates = {k: v for k, v in fields.items() if k in allowed}
-        if not updates:
-            return self.get_agreement(agreement_id)
-        updates["updated_at"] = utcnow()
-        assignments = ", ".join(f"{key} = ?" for key in updates)
-        params = list(updates.values()) + [agreement_id]
+    def replace_parties(
+        self, agreement_id: str, parties: list[dict[str, Any]]
+    ) -> None:
         conn = self._conn()
-        conn.execute(
-            f"UPDATE agreements SET {assignments} WHERE id = ?", params
-        )
+        conn.execute("DELETE FROM parties WHERE agreement_id = ?", (agreement_id,))
+        for party in parties:
+            conn.execute(
+                """
+                INSERT INTO parties (agreement_id, party_id, name, email, role)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    agreement_id,
+                    party.get("party_id", ""),
+                    party.get("name", ""),
+                    party.get("email", ""),
+                    party.get("role", "party"),
+                ),
+            )
         conn.commit()
-        return self.get_agreement(agreement_id)
 
     def delete_agreement(self, agreement_id: str) -> None:
         conn = self._conn()
         conn.execute("DELETE FROM agreements WHERE id = ?", (agreement_id,))
         conn.commit()
 
-    def add_recipient(
-        self,
-        agreement_id: str,
-        *,
-        name: str,
-        email: str,
-        role: str = "signer",
-        routing_order: int = 1,
-        status: str = "created",
-    ) -> None:
-        conn = self._conn()
-        conn.execute(
-            """
-            INSERT INTO recipients
-                (agreement_id, name, email, role, routing_order, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (agreement_id, name, email, role, routing_order, status),
-        )
-        conn.commit()
 
-    def replace_recipients(
-        self, agreement_id: str, recipients: list[dict[str, Any]]
-    ) -> None:
-        conn = self._conn()
-        conn.execute("DELETE FROM recipients WHERE agreement_id = ?", (agreement_id,))
-        conn.commit()
-        for index, recipient in enumerate(recipients, start=1):
-            self.add_recipient(
-                agreement_id,
-                name=recipient.get("name", ""),
-                email=recipient.get("email", ""),
-                role=recipient.get("role", "signer"),
-                routing_order=int(recipient.get("routing_order", index)),
-            )
-
-    def set_recipient_status(
-        self,
-        agreement_id: str,
-        email: str,
-        status: str,
-        signed_at: str | None = None,
-    ) -> None:
-        conn = self._conn()
-        conn.execute(
-            """
-            UPDATE recipients SET status = ?, signed_at = COALESCE(?, signed_at)
-            WHERE agreement_id = ? AND lower(email) = lower(?)
-            """,
-            (status, signed_at, agreement_id, email),
-        )
-        conn.commit()
-
-    def add_event(self, agreement_id: str, kind: str, message: str) -> None:
-        conn = self._conn()
-        conn.execute(
-            "INSERT INTO events (agreement_id, kind, message, created_at) VALUES (?, ?, ?, ?)",
-            (agreement_id, kind, message, utcnow()),
-        )
-        conn.commit()
-
-
-def seed_sample_data(db: Database) -> None:
-    """Populate a few realistic agreements so the dashboard is never empty."""
-    if db.list_agreements():
-        return
-
-    samples = [
-        {
-            "title": "Acme Corp - Master Services Agreement",
-            "client_name": "Acme Corp",
-            "agreement_type": "Master Services Agreement",
-            "value": 125000.0,
-            "owner": "karissa@example.com",
-            "status": "completed",
-            "effective_date": "2026-01-15",
-            "notes": "Annual renewal. Signed by both parties.",
-            "completed_at": "2026-01-22T14:05:00+00:00",
-            "recipients": [
-                {
-                    "name": "Dana Whitfield",
-                    "email": "dana.whitfield@acme.example",
-                    "role": "signer",
-                    "status": "completed",
-                },
-                {
-                    "name": "Karissa Jacobsen",
-                    "email": "karissa@example.com",
-                    "role": "carbonCopy",
-                    "status": "completed",
-                },
-            ],
-        },
-        {
-            "title": "Northwind Traders - Sales Agreement",
-            "client_name": "Northwind Traders",
-            "agreement_type": "Sales Agreement",
-            "value": 48900.0,
-            "owner": "karissa@example.com",
-            "status": "sent",
-            "effective_date": "2026-02-01",
-            "notes": "Awaiting counter-signature from procurement.",
-            "recipients": [
-                {
-                    "name": "Priya Raman",
-                    "email": "priya.raman@northwind.example",
-                    "role": "signer",
-                    "status": "delivered",
-                }
-            ],
-        },
-        {
-            "title": "Globex - Mutual NDA",
-            "client_name": "Globex",
-            "agreement_type": "Mutual NDA",
-            "value": 0.0,
-            "owner": "legal@example.com",
-            "status": "draft",
-            "effective_date": "2026-02-10",
-            "notes": "Draft pending legal review of section 4.",
-            "recipients": [
-                {
-                    "name": "Sam Okafor",
-                    "email": "sam.okafor@globex.example",
-                    "role": "signer",
-                    "status": "created",
-                }
-            ],
-        },
-        {
-            "title": "Initech - Statement of Work",
-            "client_name": "Initech",
-            "agreement_type": "Statement of Work",
-            "value": 18750.0,
-            "owner": "delivery@example.com",
-            "status": "declined",
-            "effective_date": "2026-01-05",
-            "notes": "Declined - budget moved to next quarter.",
-            "recipients": [
-                {
-                    "name": "Bill Lumbergh",
-                    "email": "bill.lumbergh@initech.example",
-                    "role": "signer",
-                    "status": "declined",
-                }
-            ],
-        },
-        {
-            "title": "Umbrella Health - Vendor Agreement",
-            "client_name": "Umbrella Health",
-            "agreement_type": "Vendor Agreement",
-            "value": 73200.0,
-            "owner": "karissa@example.com",
-            "status": "delivered",
-            "effective_date": "2026-02-05",
-            "notes": "Compliance addendum included.",
-            "recipients": [
-                {
-                    "name": "Alex Moreau",
-                    "email": "alex.moreau@umbrella.example",
-                    "role": "signer",
-                    "status": "delivered",
-                },
-                {
-                    "name": "Rita Chen",
-                    "email": "rita.chen@umbrella.example",
-                    "role": "carbonCopy",
-                    "status": "sent",
-                },
-            ],
-        },
-    ]
-
-    for sample in samples:
-        recipients = sample.pop("recipients")
-        agreement = db.create_agreement(recipients=recipients, **sample)
-        db.add_event(
-            agreement["id"],
-            "seeded",
-            "Sample agreement loaded for demonstration",
-        )
-
-
-def to_json(value: Any) -> str:
-    return json.dumps(value, default=str)
+def _load_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
