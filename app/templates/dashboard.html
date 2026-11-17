@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Agreement Manager{% endblock %}
+{% block content %}
+
+{% if not docusign_connected %}
+<div class="alert alert-info">
+  Not connected to Docusign yet. You can browse and create agreements now, then
+  <a href="/settings">connect to Docusign</a> to send envelopes.
+</div>
+{% endif %}
+
+<div class="page-head">
+  <div>
+    <h1>Agreements</h1>
+    <p>{{ agreements|length }} agreement{{ '' if agreements|length == 1 else 's' }} · total value
+      ${{ '{:,.2f}'.format(total_value) }}</p>
+  </div>
+  <div class="btn-row">
+    <a class="btn btn-primary" href="/agreements/new">+ New agreement</a>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="stat"><div class="label">Draft</div><div class="value">{{ counts.draft }}</div></div>
+  <div class="stat"><div class="label">Sent</div><div class="value">{{ counts.sent }}</div></div>
+  <div class="stat"><div class="label">Delivered</div><div class="value">{{ counts.delivered }}</div></div>
+  <div class="stat"><div class="label">Completed</div><div class="value">{{ counts.completed }}</div></div>
+  <div class="stat"><div class="label">Declined</div><div class="value">{{ counts.declined }}</div></div>
+  <div class="stat"><div class="label">Voided</div><div class="value">{{ counts.voided }}</div></div>
+</div>
+
+<form class="filters" method="get" action="/">
+  <div class="field grow">
+    <label for="q">Search</label>
+    <input type="search" id="q" name="q" value="{{ filters.q }}"
+           placeholder="Title, client, owner or id" />
+  </div>
+  <div class="field">
+    <label for="status">Status</label>
+    <select id="status" name="status">
+      <option value="">All statuses</option>
+      {% for s in statuses %}
+      <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s|capitalize }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="type">Type</label>
+    <select id="type" name="type">
+      <option value="">All types</option>
+      {% for t in types %}
+      <option value="{{ t }}" {% if filters.type == t %}selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <button class="btn btn-primary" type="submit">Filter</button>
+  </div>
+  {% if filters.q or filters.status or filters.type %}
+  <div class="field"><a class="btn" href="/">Clear</a></div>
+  {% endif %}
+</form>
+
+<div class="card" style="padding:0; overflow:hidden;">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Agreement</th>
+          <th>Client</th>
+          <th>Type</th>
+          <th>Value</th>
+          <th>Status</th>
+          <th>Recipients</th>
+          <th>Updated</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in agreements %}
+        <tr>
+          <td>
+            <a href="/agreements/{{ a.id }}"><strong>{{ a.title }}</strong></a>
+            {% if a.envelope_id %}
+            <div class="mono muted">env {{ a.envelope_id[:18] }}…</div>
+            {% endif %}
+          </td>
+          <td>{{ a.client_name or '—' }}</td>
+          <td>{{ a.agreement_type }}</td>
+          <td>${{ '{:,.0f}'.format(a.value) }}</td>
+          <td><span class="badge badge-{{ a.status }}">{{ a.status }}</span></td>
+          <td>{{ a.recipients|length }}</td>
+          <td class="muted">{{ a.updated_at[:10] }}</td>
+          <td class="actions right">
+            <a class="btn btn-sm" href="/agreements/{{ a.id }}">View</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="8" class="empty">
+            No agreements match your filters.
+            <a href="/agreements/new">Create one</a>.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

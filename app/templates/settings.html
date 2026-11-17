@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Settings · Agreement Manager{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p>Connection to the Docusign <strong>{{ docusign_env }}</strong> environment.</p>
+  </div>
+</div>
+
+{% if request.query_params.get('connected') %}
+<div class="alert alert-ok">Connected to Docusign.</div>
+{% endif %}
+{% if request.query_params.get('error') %}
+<div class="alert alert-error">{{ request.query_params.get('error') }}</div>
+{% endif %}
+
+<div class="detail-grid">
+  <div>
+    <div class="card">
+      <h2>Connection</h2>
+      {% if docusign_connected %}
+        <dl class="meta">
+          <dt>Status</dt><dd><span class="badge badge-completed">connected</span></dd>
+          <dt>Auth method</dt><dd>{{ session.get('auth_type', '—') }}</dd>
+          <dt>User</dt><dd>{{ session.get('user_email') or session.get('user_name') or '—' }}</dd>
+          <dt>Account ID</dt><dd class="mono">{{ session.get('account_id', '—') }}</dd>
+          <dt>Base URI</dt><dd class="mono">{{ session.get('base_uri', '—') }}</dd>
+        </dl>
+        <form method="post" action="/oauth/disconnect" style="margin-top:14px;">
+          <button class="btn btn-danger" type="submit">Disconnect</button>
+        </form>
+      {% else %}
+        <p class="muted">Not connected.</p>
+        <div class="btn-row">
+          <a class="btn btn-primary" href="/oauth/connect">Connect to Docusign</a>
+        </div>
+        {% if auth_code_configured %}
+          <p class="hint">Authorization Code Grant is configured — you will be redirected to Docusign to grant consent.</p>
+        {% elif jwt_configured %}
+          <p class="hint">JWT Grant is configured — a token will be requested silently.</p>
+        {% else %}
+          <div class="alert alert-warn" style="margin-top:14px;">
+            No credentials found. Add them to <span class="mono">.env</span> (see
+            <span class="mono">.env.example</span>) and restart the app.
+          </div>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Configuration status</h2>
+      <dl class="meta">
+        <dt>Integration key</dt>
+        <dd>{% if integration_key_set %}<span class="badge badge-completed">set</span>{% else %}<span class="badge badge-declined">missing</span>{% endif %}</dd>
+        <dt>Client secret</dt>
+        <dd>{% if auth_code_configured %}<span class="badge badge-completed">set</span>{% else %}<span class="badge badge-draft">not set</span>{% endif %}</dd>
+        <dt>JWT (user id + key)</dt>
+        <dd>{% if jwt_configured %}<span class="badge badge-completed">ready</span>{% else %}<span class="badge badge-draft">not set</span>{% endif %}</dd>
+        <dt>Redirect URI</dt><dd class="mono">{{ redirect_uri }}</dd>
+        <dt>Environment</dt><dd>{{ docusign_env }}</dd>
+        <dt>Account ID override</dt><dd class="mono">{{ account_id or '— (auto-discover)' }}</dd>
+      </dl>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>Setup checklist</h2>
+      <ol class="muted" style="padding-left:18px; font-size:14px;">
+        <li>Create an app at <a href="https://developers.docusign.com/platform/apps-and-keys" target="_blank" rel="noopener">Apps and Keys</a>.</li>
+        <li>Copy the <strong>integration key</strong> and (for Auth Code) the <strong>secret key</strong> into <span class="mono">.env</span>.</li>
+        <li>Add a redirect URI matching <span class="mono">{{ redirect_uri }}</span>.</li>
+        <li>For JWT Grant: add an RSA key pair, save the private key, and set <span class="mono">DOCUSIGN_USER_ID</span>.</li>
+        <li>Grant consent once (JWT) or click Connect (Auth Code).</li>
+        <li>Restart the app after editing <span class="mono">.env</span>.</li>
+      </ol>
+      <p class="hint">Credentials are read from the environment / <span class="mono">.env</span> and are never stored in the browser or committed to git.</p>
+    </div>
+  </aside>
+</div>
+
+{% endblock %}

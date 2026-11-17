@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}Agreement Manager{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">
+        <span class="brand-mark">AM</span>
+        <span class="brand-text">Agreement Manager</span>
+      </a>
+      <nav class="nav">
+        <a href="/" class="{% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="/agreements/new" class="{% if active == 'new' %}active{% endif %}">New agreement</a>
+        <a href="/settings" class="{% if active == 'settings' %}active{% endif %}">Settings</a>
+      </nav>
+      <div class="conn-pill" id="conn-pill"
+           data-connected="{{ 'true' if docusign_connected else 'false' }}">
+        <span class="dot"></span>
+        <span class="conn-label">
+          {% if docusign_connected %}
+            Docusign {{ docusign_env }} · connected
+          {% else %}
+            Docusign {{ docusign_env }} · not connected
+          {% endif %}
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="toast" class="toast" hidden></div>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    Agreement Manager v{{ version }} · Docusign environment: <strong>{{ docusign_env }}</strong>
+  </footer>
+
+  <script src="/static/js/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
