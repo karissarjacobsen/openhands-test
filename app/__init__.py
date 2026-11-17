@@ -1,3 +1,3 @@
-"""Agreement Manager - a small Docusign eSignature demo application."""
+"""Agreement Manager - a Docusign Agreement Manager (IAM) API demo application."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

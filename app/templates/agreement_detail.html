@@ -2,9 +2,6 @@
 {% block title %}{{ agreement.title }} · Agreement Manager{% endblock %}
 {% block content %}
 
-{% if request.query_params.get('sent') %}
-<div class="alert alert-ok">Envelope created and sent to recipients.</div>
-{% endif %}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error">{{ request.query_params.get('error') }}</div>
 {% endif %}
@@ -14,17 +11,14 @@
     <h1>{{ agreement.title }}</h1>
     <p>
       <span class="badge badge-{{ agreement.status }}">{{ agreement.status }}</span>
-      · {{ agreement.agreement_type }}
+      {% if agreement.agreement_type %} · {{ agreement.agreement_type }}{% endif %}
       {% if agreement.client_name %} · {{ agreement.client_name }}{% endif %}
     </p>
   </div>
   <div class="btn-row">
     <a class="btn" href="/">← Back</a>
-    {% if agreement.document_name %}
+    {% if agreement.agm_id %}
     <a class="btn" href="/agreements/{{ agreement.id }}/download">Download document</a>
-    {% endif %}
-    {% if agreement.status == 'completed' %}
-    <a class="btn" href="/agreements/{{ agreement.id }}/download/archive">Download archive (ZIP)</a>
     {% endif %}
   </div>
 </div>
@@ -35,22 +29,22 @@
       <h2>Agreement details</h2>
       <dl class="meta">
         <dt>Agreement ID</dt><dd class="mono">{{ agreement.id }}</dd>
+        <dt>Agreement Manager ID</dt><dd class="mono">{{ agreement.agm_id or '— (local only)' }}</dd>
         <dt>Client</dt><dd>{{ agreement.client_name or '—' }}</dd>
-        <dt>Type</dt><dd>{{ agreement.agreement_type }}</dd>
+        <dt>Type</dt><dd>{{ agreement.agreement_type or '—' }}</dd>
         <dt>Value</dt><dd>{{ agreement.currency }} {{ '{:,.2f}'.format(agreement.value) }}</dd>
         <dt>Owner</dt><dd>{{ agreement.owner or '—' }}</dd>
         <dt>Effective date</dt><dd>{{ agreement.effective_date or '—' }}</dd>
         <dt>Created</dt><dd>{{ agreement.created_at[:19].replace('T', ' ') }}</dd>
         <dt>Updated</dt><dd>{{ agreement.updated_at[:19].replace('T', ' ') }}</dd>
-        {% if agreement.completed_at %}
-        <dt>Completed</dt><dd>{{ agreement.completed_at[:19].replace('T', ' ') }}</dd>
-        {% endif %}
-        <dt>Envelope ID</dt>
-        <dd class="mono">{{ agreement.envelope_id or '—' }}</dd>
-        <dt>Docusign status</dt>
-        <dd>{% if agreement.docusign_status %}<span class="badge badge-{{ agreement.docusign_status }}">{{ agreement.docusign_status }}</span>{% else %}—{% endif %}</dd>
+        <dt>Agreement Manager status</dt>
+        <dd>{% if agreement.agm_status %}<span class="badge badge-{{ agreement.status }}">{{ agreement.agm_status }}</span>{% else %}—{% endif %}</dd>
         <dt>Document</dt><dd>{{ agreement.document_name or '—' }}</dd>
       </dl>
+      {% if agreement.summary %}
+      <h3>Summary</h3>
+      <p>{{ agreement.summary }}</p>
+      {% endif %}
       {% if agreement.notes %}
       <h3>Notes</h3>
       <p>{{ agreement.notes }}</p>
@@ -58,28 +52,38 @@
     </div>
 
     <div class="card">
-      <h2>Recipients</h2>
+      <h2>Parties</h2>
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Name</th><th>Email</th><th>Role</th><th>Order</th><th>Status</th><th>Signed</th></tr>
+            <tr><th>Name</th><th>Role</th><th>Order</th></tr>
           </thead>
           <tbody>
-            {% for r in agreement.recipients %}
+            {% for p in agreement.parties %}
             <tr>
-              <td>{{ r.name }}</td>
-              <td>{{ r.email }}</td>
-              <td><span class="badge badge-role">{{ r.role }}</span></td>
-              <td>{{ r.routing_order }}</td>
-              <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
-              <td class="muted">{{ r.signed_at[:19].replace('T',' ') if r.signed_at else '—' }}</td>
+              <td>{{ p.name }}</td>
+              <td><span class="badge badge-role">{{ p.role }}</span></td>
+              <td>{{ p.routing_order }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="6" class="empty">No recipients.</td></tr>
+            <tr><td colspan="3" class="empty">No parties.</td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Provisions</h2>
+      {% if agreement.provisions %}
+      <dl class="meta">
+        {% for key, value in agreement.provisions.items() %}
+        <dt class="mono">{{ key }}</dt><dd>{{ value }}</dd>
+        {% endfor %}
+      </dl>
+      {% else %}
+      <p class="muted">No provisions extracted.</p>
+      {% endif %}
     </div>
 
     <div class="card">
@@ -100,47 +104,70 @@
 
   <aside>
     <div class="card">
-      <h2>Docusign actions</h2>
+      <h2>Agreement Manager actions</h2>
+      {% if agreement.agm_id %}
       <div class="stack">
-        {% if not agreement.envelope_id %}
-          <button class="btn btn-primary" data-action="send" data-id="{{ agreement.id }}">
-            Send for signature
-          </button>
-          <p class="hint">Uploads the stored PDF and creates a Docusign envelope.</p>
-        {% else %}
-          <button class="btn" data-action="refresh" data-id="{{ agreement.id }}">
-            Refresh status from Docusign
-          </button>
-          <a class="btn" href="/agreements/{{ agreement.id }}/download?document_id=combined">
-            Download completed PDF
-          </a>
-          <a class="btn" href="/agreements/{{ agreement.id }}/download?document_id=certificate">
-            Download certificate of completion
-          </a>
-          {% if agreement.status not in terminal_statuses %}
-          <form method="post" action="/agreements/{{ agreement.id }}/void"
-                onsubmit="return confirm('Void this envelope? This cannot be undone.');">
-            <input type="hidden" name="reason" value="Voided by sender from Agreement Manager" />
-            <button class="btn btn-danger" type="submit">Void envelope</button>
-          </form>
-          {% endif %}
-        {% endif %}
+        <button class="btn" data-action="refresh" data-id="{{ agreement.id }}">
+          Refresh from Agreement Manager
+        </button>
+        <a class="btn" href="/agreements/{{ agreement.id }}/download">
+          Download document
+        </a>
       </div>
+
+      <h3>Change agreement type</h3>
+      <form id="change-type-form" data-id="{{ agreement.id }}">
+        <label for="new-type">Target type</label>
+        <input type="text" id="new-type" name="type" placeholder="Statement of Work"
+               value="{{ agreement.agreement_type }}" />
+        <p class="hint">Must match a configured agreement type for the account.</p>
+        <button class="btn" type="submit">Change type</button>
+      </form>
+
+      <h3>Patch fields</h3>
+      <form id="patch-form" data-id="{{ agreement.id }}">
+        <label for="patch-title">Title</label>
+        <input type="text" id="patch-title" name="title" value="{{ agreement.title }}" />
+        <label for="patch-summary">Summary</label>
+        <textarea id="patch-summary" name="summary" rows="3">{{ agreement.summary }}</textarea>
+        <label for="patch-status">Status</label>
+        <select id="patch-status" name="status">
+          <option value="PENDING" {% if agreement.agm_status == 'PENDING' %}selected{% endif %}>PENDING</option>
+          <option value="COMPLETE" {% if agreement.agm_status == 'COMPLETE' %}selected{% endif %}>COMPLETE</option>
+          <option value="INACTIVE" {% if agreement.agm_status == 'INACTIVE' %}selected{% endif %}>INACTIVE</option>
+        </select>
+        <button class="btn btn-primary" type="submit">Save patch</button>
+      </form>
+
+      <h3>Delete</h3>
+      <form method="post" action="/api/agreements/{{ agreement.id }}/delete-from-agm"
+            onsubmit="return confirm('Delete this agreement from Agreement Manager? This cannot be undone.');">
+        <button class="btn btn-danger" type="submit">Delete from Agreement Manager</button>
+      </form>
+      {% else %}
+      <p class="muted">
+        This agreement is not linked to an Agreement Manager record, so patch, change
+        type and delete are unavailable.
+      </p>
+      {% endif %}
+
+      <h3>Local cache</h3>
+      <form method="post" action="/agreements/{{ agreement.id }}/delete"
+            onsubmit="return confirm('Remove this agreement from the local cache?');">
+        <button class="btn" type="submit">Remove from local cache</button>
+      </form>
+
       {% if not docusign_connected %}
       <div class="alert alert-warn" style="margin-top:14px;">
         Not connected to Docusign. <a href="/settings">Connect first</a>.
       </div>
       {% endif %}
     </div>
-
-    <div class="card">
-      <h2>Manage</h2>
-      <form method="post" action="/agreements/{{ agreement.id }}/delete"
-            onsubmit="return confirm('Delete this agreement record? This does not affect Docusign envelopes.');">
-        <button class="btn btn-danger" type="submit">Delete agreement</button>
-      </form>
-    </div>
   </aside>
 </div>
 
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/agreement_detail.js"></script>
 {% endblock %}
