@@ -1,0 +1,20 @@
+# Local runtime data: database, uploaded documents, cached OAuth tokens
+data/
+
+# Secrets
+.env
+*.pem
+private_key.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
