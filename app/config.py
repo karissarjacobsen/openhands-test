@@ -9,24 +9,28 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "agreements.db"
 
+# Docusign OAuth host and Agreement Manager API host per environment.
 ENVIRONMENTS = {
     "demo": {
         "auth_server": "account-d.docusign.com",
-        "base_uri": "https://demo.docusign.net",
+        "api_base": "https://api-d.docusign.com",
     },
     "prod": {
         "auth_server": "account.docusign.com",
-        "base_uri": "https://www.docusign.net",
+        "api_base": "https://api.docusign.com",
     },
 }
 
-# Scopes required for the eSignature REST API. `impersonation` is only used by
-# JWT Grant; Authorization Code Grant must not request it.
-JWT_SCOPES = "signature impersonation"
-AUTH_CODE_SCOPES = "signature"
+# Scopes required by the Agreement Manager API. `adm_store_unified_repo_read`
+# grants read access to the agreement repository and `public_dms_document_read`
+# allows document downloads. `impersonation` is only used by JWT Grant.
+AGM_SCOPES = "signature adm_store_unified_repo_read public_dms_document_read"
+JWT_SCOPES = f"{AGM_SCOPES} impersonation"
+AUTH_CODE_SCOPES = AGM_SCOPES
+
+AGM_API_VERSION = "v1"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -57,7 +61,6 @@ class Settings:
     port: int = 12000
     base_dir: Path = BASE_DIR
     data_dir: Path = DATA_DIR
-    upload_dir: Path = UPLOAD_DIR
     db_path: Path = DB_PATH
     _private_key_cache: str | None = field(default=None, repr=False)
 
@@ -67,9 +70,10 @@ class Settings:
         return env["auth_server"]
 
     @property
-    def default_base_uri(self) -> str:
+    def agm_base_url(self) -> str:
+        """Base URL of the Agreement Manager API for the configured environment."""
         env = ENVIRONMENTS.get(self.environment, ENVIRONMENTS["demo"])
-        return env["base_uri"]
+        return f"{env['api_base'].rstrip('/')}/{AGM_API_VERSION}"
 
     @property
     def jwt_configured(self) -> bool:
@@ -94,7 +98,6 @@ class Settings:
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
 
 
 def load_settings() -> Settings:

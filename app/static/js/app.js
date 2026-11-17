@@ -40,22 +40,28 @@
 
   window.App = { toast: toast, setLoading: setLoading, postJSON: postJSON };
 
-  // Wire up the action buttons on the agreement detail page.
+  // Wire up the action buttons on the dashboard and agreement detail pages.
   document.addEventListener("click", async function (event) {
     var button = event.target.closest("button[data-action]");
     if (!button) return;
     var action = button.dataset.action;
     var id = button.dataset.id;
-    if (!action || !id) return;
+    if (!action) return;
 
-    var labels = { send: "Sending…", refresh: "Refreshing…" };
+    var labels = { sync: "Refreshing…", refresh: "Refreshing…" };
     setLoading(button, true, labels[action]);
 
+    var url = action === "sync"
+      ? "/agreements/sync"
+      : "/agreements/" + id + "/" + action;
+
     try {
-      var payload = await postJSON("/agreements/" + id + "/" + action);
+      var payload = await postJSON(url);
       if (payload.ok) {
         toast(
-          action === "send" ? "Envelope sent." : "Status refreshed.",
+          action === "sync"
+            ? "Loaded " + (payload.synced || 0) + " agreement(s) from Agreement Manager."
+            : "Refreshed from Agreement Manager.",
           "ok"
         );
         setTimeout(function () { window.location.reload(); }, 900);
