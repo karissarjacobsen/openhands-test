@@ -81,6 +81,9 @@ a:hover { text-decoration: underline; }
 .conn-pill[data-connected="true"] .dot { background: var(--ok); }
 .conn-pill[data-connected="false"] .dot { background: var(--warn); }
 
+.auth-actions { display: flex; align-items: center; }
+.auth-actions form { margin: 0; }
+
 /* ------------------------------------------------------------- container */
 .container { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
 

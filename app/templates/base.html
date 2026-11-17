@@ -24,11 +24,20 @@
         <span class="dot"></span>
         <span class="conn-label">
           {% if docusign_connected %}
-            Docusign {{ docusign_env }} · connected
+            Docusign {{ docusign_env }} · {{ docusign_user or 'connected' }}
           {% else %}
             Docusign {{ docusign_env }} · not connected
           {% endif %}
         </span>
+      </div>
+      <div class="auth-actions">
+        {% if docusign_connected %}
+          <form method="post" action="/oauth/disconnect">
+            <button class="btn btn-sm" type="submit">Sign out</button>
+          </form>
+        {% else %}
+          <a class="btn btn-sm btn-primary" id="login-btn" href="/login">Sign in with Docusign</a>
+        {% endif %}
       </div>
     </div>
   </header>

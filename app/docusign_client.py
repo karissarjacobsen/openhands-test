@@ -3,12 +3,12 @@
 Implements the parts of the API this app needs, directly against the REST
 endpoints so the behaviour is easy to follow and there is no SDK to pin:
 
-* OAuth 2.0 JWT Grant   -> service integrations (no user interaction)
-* OAuth 2.0 Auth Code   -> user-interactive consent
-* Envelopes:create      -> upload a PDF and create/send an envelope
-* Envelopes:get         -> envelope status
-* EnvelopeRecipients    -> per-recipient status
-* EnvelopeDocuments:get -> download the completed (combined) PDF
+* OAuth 2.0 Authorization Code Grant -> user-interactive consent
+* Envelopes:listStatusChanges     -> the signed-in user's envelopes
+* Envelopes:create                -> upload a PDF and create/send an envelope
+* Envelopes:get                   -> envelope status
+* EnvelopeRecipients              -> per-recipient status
+* EnvelopeDocuments:get           -> download the completed (combined) PDF
 
 Docs: https://developers.docusign.com/docs/esign-rest-api/
 """
@@ -21,11 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-import jwt
 
 from .config import (
     AUTH_CODE_SCOPES,
-    JWT_SCOPES,
     Settings,
 )
 
@@ -81,59 +79,7 @@ class DocusignClient:
                 expires_at=time.time() + 3600,
             )
 
-    # ------------------------------------------------------------- auth: JWT
-
-    def _build_jwt(self) -> str:
-        private_key = self.settings._private_key()
-        if not (self.settings.integration_key and self.settings.user_id and private_key):
-            raise DocusignError(
-                "JWT Grant is not configured. Set DOCUSIGN_INTEGRATION_KEY, "
-                "DOCUSIGN_USER_ID and DOCUSIGN_PRIVATE_KEY_PATH."
-            )
-        now = int(time.time())
-        payload = {
-            "iss": self.settings.integration_key,
-            "sub": self.settings.user_id,
-            "aud": self.settings.auth_server,
-            "iat": now,
-            "exp": now + 3600,
-            "scope": JWT_SCOPES,
-        }
-        return jwt.encode(
-            payload,
-            private_key,
-            algorithm="RS256",
-            headers={"typ": "JWT"},
-        )
-
-    def request_jwt_token(self) -> Token:
-        """Exchange a signed JWT assertion for an access token."""
-        assertion = self._build_jwt()
-        url = f"https://{self.settings.auth_server}/oauth/token"
-        data = {
-            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-            "assertion": assertion,
-        }
-        try:
-            response = httpx.post(url, data=data, timeout=30)
-        except httpx.HTTPError as exc:
-            raise DocusignError(f"Could not reach Docusign token endpoint: {exc}") from exc
-        if response.status_code != 200:
-            raise DocusignError(
-                _auth_error_message(response),
-                status_code=response.status_code,
-                details=_safe_json(response),
-            )
-        payload = response.json()
-        self._token = Token(
-            access_token=payload["access_token"],
-            expires_at=time.time() + int(payload.get("expires_in", 3600)),
-            token_type=payload.get("token_type", "Bearer"),
-            scope=payload.get("scope", JWT_SCOPES),
-        )
-        return self._token
-
-    # --------------------------------------------------- auth: authorization code
+    # ------------------------------------------------------- auth: authorization code
 
     def authorization_url(self, state: str) -> str:
         if not self.settings.auth_code_configured:
@@ -218,7 +164,9 @@ class DocusignClient:
     def _ensure_token(self) -> Token:
         if self._token and self._token.is_valid:
             return self._token
-        return self.request_jwt_token()
+        raise DocusignError(
+            "Not connected to Docusign. Sign in with Docusign to obtain an access token."
+        )
 
     def _base_url(self) -> str:
         base_uri = self.settings.default_base_uri
@@ -363,14 +311,23 @@ class DocusignClient:
         return self._request("GET", url)
 
     def list_envelopes(
-        self, *, from_date: str | None = None, status: str | None = None
+        self,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        status: str | None = None,
+        include_recipients: bool = False,
     ) -> dict[str, Any]:
         account_id = self.account_id()
         params: dict[str, Any] = {}
         if from_date:
             params["from_date"] = from_date
+        if to_date:
+            params["to_date"] = to_date
         if status:
             params["status"] = status
+        if include_recipients:
+            params["include"] = "recipients"
         url = f"{self._base_url()}/accounts/{account_id}/envelopes"
         return self._request("GET", url, params=params or None)
 

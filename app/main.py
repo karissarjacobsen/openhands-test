@@ -1,10 +1,13 @@
 """Agreement Manager - FastAPI application.
 
 Phases implemented:
-  1. Dashboard, agreement detail/status views, create form (sample data seeded).
-  2. Docusign OAuth (JWT Grant + Authorization Code), PDF upload, envelope create/send.
+  1. Dashboard, agreement detail/status views, create form.
+  2. Docusign OAuth (Authorization Code Grant), PDF upload, envelope create/send.
   3. Envelope status refresh, recipient/completion info, completed document download.
   4. Search/filtering, sample templates, error handling and loading states.
+
+Agreements are loaded from the signed-in user's Docusign account; there is no
+local sample data. Signing in requires Authorization Code Grant credentials.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import threading
 import time
 import uuid
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -28,13 +32,12 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from . import __version__
 from .config import load_settings
-from .db import STATUSES, TERMINAL_STATUSES, Database, seed_sample_data
+from .db import STATUSES, TERMINAL_STATUSES, Database
 from .docusign_client import DocusignClient, DocusignError, encode_document
 from .templates_data import get_template, list_templates
 
 settings = load_settings()
 db = Database(settings.db_path)
-seed_sample_data(db)
 
 app = FastAPI(title="Agreement Manager", version=__version__)
 app.mount("/static", StaticFiles(directory=settings.base_dir / "app" / "static"), name="static")
@@ -48,6 +51,9 @@ _SESSIONS: dict[str, dict[str, Any]] = {}
 _SESSION_LOCK = threading.Lock()
 SESSION_COOKIE = "am_session"
 SESSION_MAX_AGE = 8 * 60 * 60
+
+# How far back to pull envelopes from the user's Docusign account.
+SYNC_LOOKBACK_DAYS = 90
 
 
 # --------------------------------------------------------------------- session
@@ -78,7 +84,7 @@ def _save_session(session_id: str, data: dict[str, Any]) -> None:
 
 
 def _client_for_session(session: dict[str, Any] | None) -> DocusignClient:
-    """Build a Docusign client. Uses the session token if present, else JWT Grant."""
+    """Build a Docusign client from the session's Authorization Code token."""
     token = (session or {}).get("access_token")
     return DocusignClient(settings, access_token=token)
 
@@ -95,7 +101,6 @@ def _templates_context(request: Request, **extra: Any) -> dict[str, Any]:
         "docusign_env": settings.environment,
         "docusign_connected": _connected(session),
         "docusign_user": (session or {}).get("user_email", ""),
-        "jwt_configured": settings.jwt_configured,
         "auth_code_configured": settings.auth_code_configured,
         "version": __version__,
     }
@@ -130,10 +135,9 @@ def _error_response(exc: Exception, status: int = 400) -> JSONResponse:
 
 
 def _require_connected(session: dict[str, Any] | None) -> None:
-    if not _connected(session) and not settings.jwt_configured:
+    if not _connected(session):
         raise DocusignError(
-            "Not connected to Docusign. Connect on the Settings page or configure "
-            "JWT Grant credentials in .env."
+            "Not connected to Docusign. Sign in with Docusign to continue."
         )
 
 
@@ -147,6 +151,13 @@ def dashboard(
     status: str = "",
     type: str = "",
 ) -> HTMLResponse:
+    session = _get_session(request)
+    sync_error = ""
+    if _connected(session):
+        try:
+            _sync_envelopes(session)
+        except DocusignError as exc:
+            sync_error = exc.message
     agreements = db.list_agreements(
         search=q or None, status=status or None, agreement_type=type or None
     )
@@ -161,6 +172,7 @@ def dashboard(
         total_value=total_value,
         types=db.distinct_types(),
         filters={"q": q, "status": status, "type": type},
+        sync_error=sync_error,
     )
 
 
@@ -322,7 +334,7 @@ def delete_agreement(agreement_id: str) -> RedirectResponse:
 
 @app.get("/oauth/connect")
 def oauth_connect(request: Request):
-    """Start Authorization Code Grant, or fall back to JWT Grant for the session."""
+    """Start Authorization Code Grant sign-in."""
     session_id = request.cookies.get(SESSION_COOKIE)
     session = _get_session(request)
     if session is None:
@@ -344,50 +356,20 @@ def oauth_connect(request: Request):
         )
         return response
 
-    if settings.jwt_configured:
-        return _connect_via_jwt(request, session_id, session)
-
     return RedirectResponse(
         "/settings?error="
         + quote(
-            "Docusign is not configured. Add credentials to .env or configure an "
-            "integration key with a client secret for Authorization Code Grant."
+            "Docusign is not configured. Add an integration key and client secret "
+            "for Authorization Code Grant to .env."
         ),
         status_code=303,
     )
 
 
-def _connect_via_jwt(request: Request, session_id: str | None, session: dict[str, Any]):
-    client = DocusignClient(settings)
-    try:
-        token = client.request_jwt_token()
-        info = client.get_user_info()
-    except DocusignError as exc:
-        return RedirectResponse(
-            "/settings?error=" + quote(exc.message), status_code=303
-        )
-    session_id = session_id or _create_session()
-    session.update(
-        {
-            "access_token": token.access_token,
-            "expires_at": token.expires_at,
-            "auth_type": "jwt",
-            "account_id": info.account_id,
-            "base_uri": info.base_uri,
-            "user_email": info.email,
-            "user_name": info.name,
-        }
-    )
-    _save_session(session_id, session)
-    response = RedirectResponse("/settings?connected=1", status_code=303)
-    response.set_cookie(
-        SESSION_COOKIE,
-        serializer.dumps(session_id),
-        httponly=True,
-        samesite="lax",
-        max_age=SESSION_MAX_AGE,
-    )
-    return response
+@app.get("/login")
+def login(request: Request):
+    """Login entry point: begin the Docusign Authorization Code Grant flow."""
+    return oauth_connect(request)
 
 
 @app.get("/oauth/callback")
@@ -462,9 +444,89 @@ def api_connection(request: Request):
         "user_email": (session or {}).get("user_email", ""),
         "account_id": (session or {}).get("account_id", ""),
         "environment": settings.environment,
-        "jwt_configured": settings.jwt_configured,
         "auth_code_configured": settings.auth_code_configured,
     }
+
+
+# --------------------------------------------------- Docusign: load agreements
+
+
+def _sync_envelopes(session: dict[str, Any]) -> int:
+    """Import/refresh the signed-in user's Docusign envelopes into the local DB.
+
+    Agreements come from Docusign only; nothing is seeded locally. Returns the
+    number of envelopes seen.
+    """
+    client = _client_for_session(session)
+    from_date = (
+        datetime.now(timezone.utc) - timedelta(days=SYNC_LOOKBACK_DAYS)
+    ).isoformat(timespec="seconds")
+    payload = client.list_envelopes(from_date=from_date, include_recipients=True)
+    envelopes = payload.get("envelopes", []) or []
+    for envelope in envelopes:
+        _upsert_envelope(envelope)
+    return len(envelopes)
+
+
+def _upsert_envelope(envelope: dict[str, Any]) -> None:
+    envelope_id = envelope.get("envelopeId") or envelope.get("envelope_id")
+    if not envelope_id:
+        return
+    subject = envelope.get("emailSubject") or "Untitled agreement"
+    docusign_status = (envelope.get("status") or "").lower()
+    sender = envelope.get("sender") or {}
+    owner = sender.get("email") or sender.get("userName") or ""
+    completed_at = envelope.get("completedDateTime") or None
+
+    existing = db.get_agreement_by_envelope(envelope_id)
+    fields: dict[str, Any] = {"docusign_status": docusign_status}
+    if docusign_status:
+        fields["status"] = _map_envelope_status(docusign_status)
+    if completed_at:
+        fields["completed_at"] = completed_at
+
+    if existing is None:
+        agreement = db.create_agreement(
+            title=subject,
+            owner=owner,
+            status=fields.get("status", "sent"),
+            envelope_id=envelope_id,
+            docusign_status=docusign_status,
+            completed_at=completed_at,
+            agreement_id=envelope_id,
+        )
+        db.add_event(
+            agreement["id"], "imported", f"Loaded envelope {envelope_id} from Docusign"
+        )
+        agreement_id = agreement["id"]
+    else:
+        # Keep any local title/owner edits; only refresh the envelope state.
+        agreement_id = existing["id"]
+        db.update_agreement(agreement_id, **fields)
+
+    recipient_groups = (
+        ("signers", "signer"),
+        ("carbonCopies", "carbonCopy"),
+        ("certifiedDeliveries", "certifiedDelivery"),
+    )
+    envelope_recipients = envelope.get("recipients") or {}
+    for key, role in recipient_groups:
+        for index, recipient in enumerate(envelope_recipients.get(key) or [], start=1):
+            email = recipient.get("email", "")
+            if not email:
+                continue
+            signed_at = recipient.get("signedDateTime") or recipient.get(
+                "completedDateTime"
+            )
+            db.upsert_recipient(
+                agreement_id,
+                name=recipient.get("name", ""),
+                email=email,
+                role=role,
+                routing_order=int(recipient.get("routingOrder", index) or index),
+                status=(recipient.get("status") or "sent").lower(),
+                signed_at=signed_at,
+            )
 
 
 # ------------------------------------------------------------- Docusign: send

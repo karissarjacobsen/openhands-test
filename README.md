@@ -7,16 +7,17 @@ templates and a SQLite database.
 ## What it does
 
 **Phase 1 — Basic UI**
-- Dashboard with sample agreement data and status counters.
+- Dashboard with agreement status counters.
 - Agreement detail view with recipients, status and an activity timeline.
 - Form for creating agreements (upload a PDF or generate one from a template).
 
 **Phase 2 — Docusign integration**
-- OAuth: JWT Grant (service integration) and Authorization Code Grant (user consent).
+- OAuth: Authorization Code Grant (user sign-in and consent).
 - Connects to the Docusign developer (demo) environment.
 - Uploads a PDF and creates an envelope, then sends it to recipients.
 
 **Phase 3 — Agreement tracking**
+- Loads agreements from the signed-in user's Docusign account (no dummy data).
 - Retrieves envelope status and per-recipient status from Docusign.
 - Shows recipient and completion information on the detail page.
 - Downloads completed documents (combined PDF, certificate, or full archive).
@@ -34,29 +35,25 @@ cp .env.example .env        # fill in your Docusign credentials (see below)
 ./run.sh                    # serves on http://localhost:12000
 ```
 
-Open http://localhost:12000. The app seeds five sample agreements on first run so
-the dashboard is never empty. You can create and browse agreements without any
-Docusign credentials; you only need credentials to send envelopes.
+Open http://localhost:12000. Sign in with Docusign to load your agreements from
+your account — the app reads envelopes from Docusign and does not ship any sample
+data. You can create and browse agreements before signing in, but you need
+credentials to sign in, load your account, and send envelopes.
 
 ## Docusign setup
 
 1. Create an app at <https://developers.docusign.com/platform/apps-and-keys>.
 2. Copy the **integration key** (client ID) into `DOCUSIGN_INTEGRATION_KEY`.
-3. Add a **redirect URI** matching `DOCUSIGN_REDIRECT_URI`
+3. Copy the **secret key** into `DOCUSIGN_CLIENT_SECRET`.
+4. Add a **redirect URI** matching `DOCUSIGN_REDIRECT_URI`
    (default `http://localhost:12000/oauth/callback`).
 
-Then pick one OAuth flow:
+Then sign in:
 
-**Authorization Code Grant** (interactive, recommended for hosted apps)
-- Copy the **secret key** into `DOCUSIGN_CLIENT_SECRET`.
-- Click *Connect to Docusign* on the Settings page and grant consent.
-
-**JWT Grant** (non-interactive, for service integrations)
-- Add an RSA key pair to the app, save the private key, and set
-  `DOCUSIGN_PRIVATE_KEY_PATH`.
-- Set `DOCUSIGN_USER_ID` to the API user GUID from *My Account Information*.
-- Grant consent once by visiting the consent URL shown in the Docusign docs
-  (`response_type=code&scope=signature%20impersonation&client_id=...`).
+**Authorization Code Grant** (interactive)
+- Click *Sign in with Docusign* (or the *Sign in with Docusign* button in the
+  header) and grant consent. The app stores the access token server-side and
+  loads your envelopes from the account.
 
 Credentials live in `.env` (git-ignored) or the environment. They are never
 stored in the browser or committed. Access tokens are held server-side in an
@@ -76,7 +73,7 @@ app/
   main.py             FastAPI routes (pages, OAuth, envelope actions, JSON API)
   config.py           Environment / .env loading and Docusign environment URLs
   docusign_client.py  eSignature REST client (OAuth, envelopes, documents)
-  db.py               SQLite persistence + sample data
+  db.py               SQLite persistence for the Docusign agreement cache
   templates_data.py   Sample agreement templates
   pdf.py              Minimal dependency-free PDF generator
   templates/          Jinja templates
@@ -97,7 +94,8 @@ Key endpoints:
 | POST | `/agreements/{id}/refresh` | Pull status from Docusign |
 | GET | `/agreements/{id}/download` | Download combined/signed PDF |
 | GET | `/agreements/{id}/download/archive` | Download ZIP archive |
-| GET | `/oauth/connect`, `/oauth/callback` | OAuth flows |
+| GET | `/login` | Start Docusign sign-in (Authorization Code Grant) |
+| GET | `/oauth/connect`, `/oauth/callback` | OAuth flow |
 | GET | `/settings` | Connection status |
 
 The JSON API (`/api/agreements`, `/api/templates`, `/api/connection`) is used by
@@ -110,8 +108,9 @@ python -m pytest tests/ -v
 ```
 
 The suite covers the UI flows, the create form (template and upload paths),
-error handling, and the Docusign client's JWT signing, envelope construction and
-API error parsing. Docusign HTTP calls in the client tests go through httpx's
+error handling, loading agreements from the Docusign account, and the Docusign
+client's Authorization Code exchange, envelope construction and API error
+parsing. Docusign HTTP calls in the client tests go through httpx's
 `MockTransport`, so the real client code runs without touching the network.
 
 ## Notes and limitations

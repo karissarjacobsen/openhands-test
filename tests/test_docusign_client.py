@@ -12,10 +12,7 @@ import sys
 from pathlib import Path
 
 import httpx
-import jwt as pyjwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -23,72 +20,15 @@ from app.config import Settings
 from app.docusign_client import DocusignClient, DocusignError, encode_document
 
 
-@pytest.fixture(scope="module")
-def rsa_keypair(tmp_path_factory):
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    path = tmp_path_factory.mktemp("keys") / "private_key.txt"
-    path.write_bytes(pem)
-    public_pem = key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return str(path), public_pem
-
-
-def make_settings(key_path: str) -> Settings:
-    settings = Settings(
-        integration_key="test-integration-key",
-        client_secret="test-secret",
-        redirect_uri="http://localhost:12000/oauth/callback",
-        user_id="00000000-0000-0000-0000-000000000000",
-        private_key_path=key_path,
-        environment="demo",
-    )
-    return settings
-
-
-def test_jwt_assertion_is_signed_and_well_formed(rsa_keypair):
-    key_path, public_pem = rsa_keypair
-    client = DocusignClient(make_settings(key_path))
-    assertion = client._build_jwt()
-    decoded = pyjwt.decode(assertion, public_pem, algorithms=["RS256"], audience="account-d.docusign.com")
-    assert decoded["iss"] == "test-integration-key"
-    assert decoded["aud"] == "account-d.docusign.com"
-    assert decoded["scope"] == "signature impersonation"
-    assert decoded["exp"] > decoded["iat"]
-
-
-def test_jwt_requires_private_key():
-    settings = Settings(integration_key="k", user_id="u", private_key_path="/nonexistent")
-    client = DocusignClient(settings)
-    with pytest.raises(DocusignError) as exc:
-        client._build_jwt()
-    assert "not configured" in str(exc.value).lower()
-
-
-def test_jwt_token_exchange(rsa_keypair, monkeypatch):
-    key_path, _ = rsa_keypair
-    settings = make_settings(key_path)
-    client = DocusignClient(settings)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/oauth/token"
-        body = request.content.decode()
-        assert "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer" in body
-        return httpx.Response(
-            200,
-            json={"access_token": "abc123", "token_type": "Bearer", "expires_in": 3600},
-        )
-
-    monkeypatch.setattr(httpx, "post", _mock_post(handler))
-    token = client.request_jwt_token()
-    assert token.access_token == "abc123"
-    assert token.is_valid
+def make_settings(**overrides) -> Settings:
+    values = {
+        "integration_key": "test-integration-key",
+        "client_secret": "test-secret",
+        "redirect_uri": "http://localhost:12000/oauth/callback",
+        "environment": "demo",
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
 def _mock_post(handler):
@@ -114,6 +54,108 @@ def _connected_client(account_id: str = "acct-1") -> DocusignClient:
         "U", (), {"account_id": account_id, "base_uri": "https://demo.docusign.net"}
     )()
     return client
+
+
+def test_authorization_url_contains_expected_params():
+    client = DocusignClient(make_settings(integration_key="my-key"))
+    url = client.authorization_url("state-xyz")
+    assert url.startswith("https://account-d.docusign.com/oauth/auth?")
+    assert "client_id=my-key" in url
+    assert "response_type=code" in url
+    assert "state=state-xyz" in url
+    assert "scope=signature" in url
+    # Authorization Code Grant must not request the JWT-only impersonation scope.
+    assert "impersonation" not in url
+
+
+def test_authorization_url_requires_secret():
+    client = DocusignClient(Settings(integration_key="k", client_secret=""))
+    with pytest.raises(DocusignError):
+        client.authorization_url("s")
+
+
+def test_exchange_code_for_token(monkeypatch):
+    client = DocusignClient(make_settings())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/oauth/token"
+        body = request.content.decode()
+        assert "grant_type=authorization_code" in body
+        assert "code=auth-code-1" in body
+        return httpx.Response(
+            200,
+            json={"access_token": "abc123", "token_type": "Bearer", "expires_in": 3600},
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    token = client.exchange_code_for_token("auth-code-1")
+    assert token.access_token == "abc123"
+    assert token.is_valid
+
+
+def test_exchange_code_reports_errors(monkeypatch):
+    client = DocusignClient(make_settings())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    with pytest.raises(DocusignError) as exc:
+        client.exchange_code_for_token("bad")
+    assert exc.value.status_code == 400
+
+
+def test_ensure_token_requires_session_token():
+    client = DocusignClient(make_settings())
+    with pytest.raises(DocusignError) as exc:
+        client._ensure_token()
+    assert "not connected" in exc.value.message.lower()
+
+
+def test_list_envelopes_passes_filters(monkeypatch):
+    client = _connected_client()
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"envelopes": [{"envelopeId": "env-1"}]})
+
+    monkeypatch.setattr(httpx, "request", _mock_request(handler))
+    payload = client.list_envelopes(
+        from_date="2026-01-01T00:00:00+00:00", include_recipients=True
+    )
+
+    assert payload["envelopes"][0]["envelopeId"] == "env-1"
+    url = captured["url"]
+    assert "/accounts/acct-1/envelopes" in url
+    assert "from_date=2026-01-01" in url
+    assert "include=recipients" in url
+
+
+def test_get_user_info_selects_account(monkeypatch):
+    client = DocusignClient(make_settings())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/oauth/userinfo"
+        return httpx.Response(
+            200,
+            json={
+                "sub": "user-1",
+                "name": "Test User",
+                "email": "user@example.com",
+                "accounts": [
+                    {"account_id": "acct-a", "base_uri": "https://demo.docusign.net"},
+                    {"account_id": "acct-b", "base_uri": "https://demo2.docusign.net"},
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "request", _mock_request(handler))
+    client._token = type("T", (), {"access_token": "tok", "is_valid": True})()  # type: ignore
+    info = client.get_user_info()
+    assert info.account_id == "acct-a"
+    assert info.email == "user@example.com"
+    assert info.base_uri == "https://demo.docusign.net"
 
 
 def test_envelope_definition_structure(monkeypatch):
@@ -187,63 +229,15 @@ def test_api_error_is_raised(monkeypatch):
     assert "Invalid recipient email" in exc.value.message
 
 
-def test_consent_required_message(monkeypatch):
-    client = DocusignClient(Settings(integration_key="k", user_id="u", private_key_path="x"))
-    client._build_jwt = lambda: "assertion"  # type: ignore
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"error": "consent_required"})
-
-    monkeypatch.setattr(httpx, "post", _mock_post(handler))
-    with pytest.raises(DocusignError) as exc:
-        client.request_jwt_token()
-    assert "consent" in exc.value.message.lower()
-
-
-def test_authorization_url_contains_expected_params():
-    settings = Settings(
-        integration_key="my-key",
-        client_secret="secret",
-        redirect_uri="http://localhost:12000/oauth/callback",
-        environment="demo",
-    )
-    client = DocusignClient(settings)
-    url = client.authorization_url("state-xyz")
-    assert url.startswith("https://account-d.docusign.com/oauth/auth?")
-    assert "client_id=my-key" in url
-    assert "response_type=code" in url
-    assert "state=state-xyz" in url
-    assert "scope=signature" in url
-
-
-def test_authorization_url_requires_secret():
-    client = DocusignClient(Settings(integration_key="k", client_secret=""))
-    with pytest.raises(DocusignError):
-        client.authorization_url("s")
-
-
 def test_download_document_returns_bytes(monkeypatch):
-    client = DocusignClient(Settings(account_id="acct-1"))
-    client._token = type("T", (), {"access_token": "tok", "is_valid": True})()  # type: ignore
-    client.get_user_info = lambda: type(  # type: ignore
-        "U", (), {"account_id": "acct-1", "base_uri": "https://demo.docusign.net"}
-    )()
+    client = _connected_client()
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert "/documents/combined" in str(request.url)
         return httpx.Response(200, content=b"%PDF-1.4 signed content")
 
-    original = httpx.request
-
-    def patched_request(method, url, **kwargs):
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-            return http.request(method, url, **kwargs)
-
-    httpx.request = patched_request
-    try:
-        content = client.download_document("env-1", "combined")
-    finally:
-        httpx.request = original
+    monkeypatch.setattr(httpx, "request", _mock_request(handler))
+    content = client.download_document("env-1", "combined")
     assert content == b"%PDF-1.4 signed content"
 
 
