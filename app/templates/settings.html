@@ -22,11 +22,10 @@
       <h2>Connection</h2>
       {% if docusign_connected %}
         <dl class="meta">
-          <dt>Status</dt><dd><span class="badge badge-completed">connected</span></dd>
+          <dt>Status</dt><dd><span class="badge badge-complete">connected</span></dd>
           <dt>Auth method</dt><dd>{{ session.get('auth_type', '—') }}</dd>
           <dt>User</dt><dd>{{ session.get('user_email') or session.get('user_name') or '—' }}</dd>
           <dt>Account ID</dt><dd class="mono">{{ session.get('account_id', '—') }}</dd>
-          <dt>Base URI</dt><dd class="mono">{{ session.get('base_uri', '—') }}</dd>
         </dl>
         <form method="post" action="/oauth/disconnect" style="margin-top:14px;">
           <button class="btn btn-danger" type="submit">Disconnect</button>
@@ -53,15 +52,24 @@
       <h2>Configuration status</h2>
       <dl class="meta">
         <dt>Integration key</dt>
-        <dd>{% if integration_key_set %}<span class="badge badge-completed">set</span>{% else %}<span class="badge badge-declined">missing</span>{% endif %}</dd>
+        <dd>{% if integration_key_set %}<span class="badge badge-complete">set</span>{% else %}<span class="badge badge-inactive">missing</span>{% endif %}</dd>
         <dt>Client secret</dt>
-        <dd>{% if auth_code_configured %}<span class="badge badge-completed">set</span>{% else %}<span class="badge badge-draft">not set</span>{% endif %}</dd>
+        <dd>{% if auth_code_configured %}<span class="badge badge-complete">set</span>{% else %}<span class="badge badge-draft">not set</span>{% endif %}</dd>
         <dt>JWT (user id + key)</dt>
-        <dd>{% if jwt_configured %}<span class="badge badge-completed">ready</span>{% else %}<span class="badge badge-draft">not set</span>{% endif %}</dd>
+        <dd>{% if jwt_configured %}<span class="badge badge-complete">ready</span>{% else %}<span class="badge badge-draft">not set</span>{% endif %}</dd>
         <dt>Redirect URI</dt><dd class="mono">{{ redirect_uri }}</dd>
         <dt>Environment</dt><dd>{{ docusign_env }}</dd>
         <dt>Account ID override</dt><dd class="mono">{{ account_id or '— (auto-discover)' }}</dd>
       </dl>
+    </div>
+
+    <div class="card">
+      <h2>Agreement Manager scopes</h2>
+      <p class="hint">Requested when the OAuth token is issued. The Agreement Manager API
+        fails if a required scope is missing.</p>
+      <ul class="muted" style="padding-left:18px; font-size:13px;">
+        {% for scope in agm_scopes %}<li class="mono">{{ scope }}</li>{% endfor %}
+      </ul>
     </div>
   </div>
 

@@ -15,18 +15,32 @@ DB_PATH = DATA_DIR / "agreements.db"
 ENVIRONMENTS = {
     "demo": {
         "auth_server": "account-d.docusign.com",
-        "base_uri": "https://demo.docusign.net",
+        "agm_base_uri": "https://api-d.docusign.com",
     },
     "prod": {
         "auth_server": "account.docusign.com",
-        "base_uri": "https://www.docusign.net",
+        "agm_base_uri": "https://api.docusign.com",
     },
 }
 
-# Scopes required for the eSignature REST API. `impersonation` is only used by
-# JWT Grant; Authorization Code Grant must not request it.
-JWT_SCOPES = "signature impersonation"
-AUTH_CODE_SCOPES = "signature"
+# OAuth scopes for the Agreement Manager (IAM) API. These are requested in
+# addition to the standard Docusign scopes; the access token is the same one
+# used across Docusign APIs.
+AGM_SCOPES = " ".join(
+    [
+        "adm_store_unified_repo_read",   # read agreements
+        "adm_store_unified_repo_write",  # patch / change-type / delete agreements
+        "document_uploader_read",        # bulk job status
+        "document_uploader_write",       # bulk job create + complete
+        "public_dms_document_read",      # download agreement documents
+        "search_read",                   # $search on the agreement list
+    ]
+)
+
+# `impersonation` is only used by JWT Grant; Authorization Code Grant must not
+# request it.
+JWT_SCOPES = f"{AGM_SCOPES} impersonation"
+AUTH_CODE_SCOPES = AGM_SCOPES
 
 
 def _load_dotenv(path: Path) -> None:
@@ -67,9 +81,9 @@ class Settings:
         return env["auth_server"]
 
     @property
-    def default_base_uri(self) -> str:
+    def agm_base_uri(self) -> str:
         env = ENVIRONMENTS.get(self.environment, ENVIRONMENTS["demo"])
-        return env["base_uri"]
+        return env["agm_base_uri"]
 
     @property
     def jwt_configured(self) -> bool:

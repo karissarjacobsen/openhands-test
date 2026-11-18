@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Agreement Manager · Agreement Manager{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Agreement Manager</h1>
+    <p>Live agreement list from the Docusign Agreement Manager API
+      (<span class="mono">Agreements:getAgreementsList</span>).</p>
+  </div>
+  <a class="btn" href="/">← Dashboard</a>
+</div>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+{% if request.query_params.get('imported') %}
+<div class="alert alert-ok">Agreement imported into the local cache.</div>
+{% endif %}
+
+<form class="filters" method="get" action="/agm">
+  <div class="field grow">
+    <label for="search">Search agreements</label>
+    <input type="search" id="search" name="search" value="{{ search }}"
+           placeholder="Keyword search ($search)" />
+  </div>
+  <div class="field">
+    <button class="btn btn-primary" type="submit">Search</button>
+  </div>
+  {% if search %}
+  <div class="field"><a class="btn" href="/agm">Clear</a></div>
+  {% endif %}
+</form>
+
+{% if not docusign_connected %}
+<div class="alert alert-info">
+  Connect to Docusign on the <a href="/settings">Settings</a> page to load agreements
+  from Agreement Manager.
+</div>
+{% else %}
+<p class="muted">{{ total }} agreement{{ '' if total == 1 else 's' }} in Agreement Manager.</p>
+{% endif %}
+
+<div class="card" style="padding:0; overflow:hidden;">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Parties</th>
+          <th>Effective</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in agm_agreements %}
+        <tr>
+          <td>
+            <strong>{{ a.title or a.file_name or 'Untitled' }}</strong>
+            <div class="mono muted">{{ a.id }}</div>
+          </td>
+          <td>{{ a.type or '—' }}</td>
+          <td><span class="badge badge-{{ 'complete' if a.status == 'COMPLETE' else ('inactive' if a.status == 'INACTIVE' else 'pending') }}">{{ a.status }}</span></td>
+          <td>
+            {% for p in a.parties or [] %}{{ p.name_in_agreement or p.name }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}
+          </td>
+          <td class="muted">{{ (a.provisions or {}).get('effective_date', '—') }}</td>
+          <td class="actions right">
+            <button class="btn btn-sm" data-import-id="{{ a.id }}">Import</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="6" class="empty">
+            {% if docusign_connected %}No agreements returned.{% else %}Not connected to Docusign.{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+  document.addEventListener("click", async function (event) {
+    var button = event.target.closest("button[data-import-id]");
+    if (!button) return;
+    var id = button.dataset.importId;
+    window.App.setLoading(button, true, "Importing…");
+    var payload = await window.App.postJSON("/api/agm/agreements/" + id + "/import");
+    if (payload.ok) {
+      window.App.toast("Imported into the local cache.", "ok");
+      button.textContent = "Imported";
+      button.disabled = true;
+    } else {
+      window.App.setLoading(button, false);
+      window.App.toast(payload.error || "Import failed.", "error");
+    }
+  });
+})();
+</script>
+{% endblock %}

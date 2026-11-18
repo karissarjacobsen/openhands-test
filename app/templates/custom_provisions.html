@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}Custom provisions · Agreement Manager{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Custom provisions</h1>
+    <p>Create and manage custom provision definitions for the account
+      (<span class="mono">CustomProvisions</span>).</p>
+  </div>
+  <a class="btn" href="/">← Dashboard</a>
+</div>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="detail-grid">
+  <div>
+    <div class="card">
+      <h2>Create a custom provision</h2>
+      <form id="provision-form">
+        <div class="form-grid">
+          <div>
+            <label for="label">Label</label>
+            <input type="text" id="label" name="label" required
+                   placeholder="My Custom Provision" />
+          </div>
+          <div>
+            <label for="category">Category</label>
+            <select id="category" name="category">
+              <option value="GENERAL">GENERAL</option>
+              <option value="PAYMENT">PAYMENT</option>
+              <option value="FINANCIAL">FINANCIAL</option>
+              <option value="TERMINATION">TERMINATION</option>
+              <option value="RENEWAL">RENEWAL</option>
+              <option value="LEGAL_AND_COMPLIANCE">LEGAL_AND_COMPLIANCE</option>
+              <option value="OTHER">OTHER</option>
+            </select>
+          </div>
+          <div>
+            <label for="type">Type</label>
+            <select id="type" name="type">
+              <option value="STRING">STRING</option>
+              <option value="NUMBER">NUMBER</option>
+              <option value="DATE">DATE</option>
+              <option value="LIST">LIST</option>
+              <option value="CURRENCY">CURRENCY</option>
+            </select>
+          </div>
+          <div>
+            <label for="options">Options (LIST only, comma-separated)</label>
+            <input type="text" id="options" name="options" placeholder="Option A, Option B" />
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:14px;">
+          <button class="btn btn-primary" type="submit" id="provision-submit">Create provision</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Provision definitions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Label</th><th>Key</th><th>Category</th><th>Type</th><th class="right">Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for p in provisions %}
+            <tr>
+              <td>{{ p.label }}</td>
+              <td class="mono">{{ p.key or '—' }}</td>
+              <td>{{ p.category }}</td>
+              <td>{{ p.type }}</td>
+              <td class="actions right">
+                {% if p.key %}
+                <button class="btn btn-sm btn-danger" data-delete-key="{{ p.key }}">Delete</button>
+                {% endif %}
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="empty">No custom provisions returned.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>Associate with an agreement type</h2>
+      <p class="hint">Add or remove provisions on a configured agreement type.</p>
+      <form id="associate-form">
+        <label for="agreement_type_key">Agreement type key</label>
+        <input type="text" id="agreement_type_key" name="agreement_type_key"
+               placeholder="nda" />
+        <label for="provision_keys">Provision keys (comma-separated)</label>
+        <input type="text" id="provision_keys" name="provision_keys"
+               placeholder="my-custom-provision" />
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="btn" type="submit" data-action="add">Add</button>
+          <button class="btn" type="submit" data-action="remove">Remove</button>
+        </div>
+      </form>
+    </div>
+  </aside>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+
+  var form = document.getElementById("provision-form");
+  if (form) {
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      var button = document.getElementById("provision-submit");
+      var body = {
+        label: document.getElementById("label").value,
+        category: document.getElementById("category").value,
+        type: document.getElementById("type").value,
+      };
+      var options = document.getElementById("options").value;
+      if (options.trim()) {
+        body.options = options.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      }
+      window.App.setLoading(button, true, "Creating…");
+      var response = await fetch("/api/agm/custom-provisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      var payload = await response.json().catch(function () {
+        return { ok: false, error: "Unexpected server response" };
+      });
+      if (payload.ok) {
+        window.App.toast("Custom provision created.", "ok");
+        setTimeout(function () { window.location.reload(); }, 800);
+      } else {
+        window.App.setLoading(button, false);
+        window.App.toast(payload.error || "Create failed.", "error");
+      }
+    });
+  }
+
+  document.addEventListener("click", async function (event) {
+    var button = event.target.closest("button[data-delete-key]");
+    if (!button) return;
+    if (!confirm("Delete this custom provision definition?")) return;
+    var key = button.dataset.deleteKey;
+    window.App.setLoading(button, true, "Deleting…");
+    var response = await fetch("/api/agm/custom-provisions", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys: [key] }),
+    });
+    var payload = await response.json().catch(function () {
+      return { ok: false, error: "Unexpected server response" };
+    });
+    if (payload.ok) {
+      window.App.toast("Custom provision deleted.", "ok");
+      setTimeout(function () { window.location.reload(); }, 800);
+    } else {
+      window.App.setLoading(button, false);
+      window.App.toast(payload.error || "Delete failed.", "error");
+    }
+  });
+
+  var associate = document.getElementById("associate-form");
+  if (associate) {
+    associate.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      var action = (event.submitter && event.submitter.dataset.action) || "add";
+      var typeKey = document.getElementById("agreement_type_key").value.trim();
+      var keys = document.getElementById("provision_keys").value
+        .split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      var body = {
+        action: action,
+        agreement_types: [{ key: typeKey, custom_provisions: keys }],
+      };
+      var response = await fetch("/api/agm/agreement-types/provisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      var payload = await response.json().catch(function () {
+        return { ok: false, error: "Unexpected server response" };
+      });
+      if (payload.ok) {
+        window.App.toast("Agreement type provisions updated.", "ok");
+      } else {
+        window.App.toast(payload.error || "Update failed.", "error");
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

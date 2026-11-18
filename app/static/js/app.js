@@ -48,16 +48,13 @@
     var id = button.dataset.id;
     if (!action || !id) return;
 
-    var labels = { send: "Sending…", refresh: "Refreshing…" };
+    var labels = { refresh: "Refreshing…" };
     setLoading(button, true, labels[action]);
 
     try {
-      var payload = await postJSON("/agreements/" + id + "/" + action);
+      var payload = await postJSON("/api/agreements/" + id + "/" + action);
       if (payload.ok) {
-        toast(
-          action === "send" ? "Envelope sent." : "Status refreshed.",
-          "ok"
-        );
+        toast("Status refreshed.", "ok");
         setTimeout(function () { window.location.reload(); }, 900);
       } else {
         setLoading(button, false);

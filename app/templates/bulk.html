@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Bulk upload · Agreement Manager{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Bulk upload</h1>
+    <p>Upload many agreements at once. This runs the full Agreement Manager bulk
+      workflow: create a job, upload each document to its pre-signed URL, then mark
+      the job complete.</p>
+  </div>
+  <a class="btn" href="/">← Dashboard</a>
+</div>
+
+{% if not docusign_connected %}
+<div class="alert alert-info">
+  Connect to Docusign on the <a href="/settings">Settings</a> page to start a bulk upload.
+</div>
+{% endif %}
+
+<div class="detail-grid">
+  <div>
+    <div class="card">
+      <h2>Start a bulk upload job</h2>
+      <form method="post" action="/api/agm/bulk/jobs" enctype="multipart/form-data" id="bulk-form">
+        <div class="form-grid">
+          <div class="full">
+            <label for="job_name">Job name</label>
+            <input type="text" id="job_name" name="job_name" required
+                   placeholder="Q4 Contract Migration" />
+          </div>
+          <div>
+            <label for="language">Language</label>
+            <input type="text" id="language" name="language" value="en-US" />
+          </div>
+          <div>
+            <label for="expected_number_of_docs">Expected documents</label>
+            <input type="number" id="expected_number_of_docs" name="expected_number_of_docs"
+                   min="0" value="0" placeholder="Auto (count of files)" />
+          </div>
+          <div class="full">
+            <label for="files">Documents</label>
+            <input type="file" id="files" name="files" multiple
+                   accept=".pdf,.doc,.docx,.txt,.html,.rtf" />
+            <div class="hint">
+              PDF, DOC, DOCX, PPTX, TXT, HTML, RTF and more. Maximum 25 MB each in this demo.
+            </div>
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:14px;">
+          <button class="btn btn-primary" type="submit" id="bulk-submit">Create job and upload</button>
+          <a class="btn" href="/api/agm/sample-document">Download a sample PDF</a>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Bulk jobs</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Job</th><th>Status</th><th>Documents</th><th>Created</th><th class="right">Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for j in bulk_jobs %}
+            <tr>
+              <td>
+                <strong>{{ j.name }}</strong>
+                <div class="mono muted">{{ j.job_id or '—' }}</div>
+              </td>
+              <td><span class="badge badge-role" data-status>{{ j.status }}</span></td>
+              <td>{{ j.expected_docs }}</td>
+              <td class="muted">{{ j.created_at[:19].replace('T',' ') }}</td>
+              <td class="actions right">
+                <button class="btn btn-sm" data-job-id="{{ j.id }}">Refresh status</button>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="empty">No bulk jobs yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>How it works</h2>
+      <ol class="muted" style="padding-left:18px; font-size:14px;">
+        <li><span class="mono">POST /upload/jobs</span> — create the job, get pre-signed URLs.</li>
+        <li><span class="mono">PUT &lt;pre-signed URL&gt;</span> — upload each document.</li>
+        <li><span class="mono">POST /upload/jobs/{id}/actions/complete</span> — trigger ingestion.</li>
+        <li><span class="mono">GET /upload/jobs/{id}</span> — poll job status.</li>
+      </ol>
+      <p class="hint">Agreement Manager then runs AI extraction and creates an agreement record
+        for each document.</p>
+    </div>
+  </aside>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("bulk-form");
+  if (form) {
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      var button = document.getElementById("bulk-submit");
+      window.App.setLoading(button, true, "Uploading…");
+      try {
+        var response = await fetch(form.action, { method: "POST", body: new FormData(form) });
+        var payload = await response.json();
+        if (payload.ok) {
+          window.App.toast("Bulk job created and documents uploaded.", "ok");
+          setTimeout(function () { window.location.reload(); }, 900);
+        } else {
+          window.App.setLoading(button, false);
+          window.App.toast(payload.error || "Bulk upload failed.", "error");
+        }
+      } catch (err) {
+        window.App.setLoading(button, false);
+        window.App.toast("Network error: " + err.message, "error");
+      }
+    });
+  }
+
+  document.addEventListener("click", async function (event) {
+    var button = event.target.closest("button[data-job-id]");
+    if (!button) return;
+    var id = button.dataset.jobId;
+    window.App.setLoading(button, true, "Checking…");
+    try {
+      var response = await fetch("/api/agm/bulk/jobs/" + id);
+      var payload = await response.json();
+      if (payload.ok) {
+        window.App.toast("Job status: " + payload.job.status, "ok");
+        setTimeout(function () { window.location.reload(); }, 700);
+      } else {
+        window.App.setLoading(button, false);
+        window.App.toast(payload.error || "Could not fetch status.", "error");
+      }
+    } catch (err) {
+      window.App.setLoading(button, false);
+      window.App.toast("Network error: " + err.message, "error");
+    }
+  });
+})();
+</script>
+{% endblock %}
